@@ -187,7 +187,7 @@ licence of the SW_RACER_RE project it is built on. The full text is in `LICENSE`
 
 Complete corresponding source, including the VR layer, is published at:
 
-    https://github.com/GameOrDie007/SW_RACER_RE
+    https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PCVR
 
 No game data is included in this download. You need your own legally obtained copy of
 Star Wars Episode I: Racer.
