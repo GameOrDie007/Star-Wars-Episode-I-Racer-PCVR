@@ -22,6 +22,12 @@ extern FILE* hook_log;
 }
 
 #include "../hook_helper.h"
+#include <cmath>
+#include "../vr_probe.h"// Quest controller values
+extern "C" {
+#include <Swr/swrUI.h>// swrUI_HandleKeyEvent_ADDR (front-end menus are event-driven)
+#include <Swr/swrEvent.h>// swrEvent_GetItem_ADDR (in-race test)
+}
 #include "../patch.h"
 #include "../imgui_utils.h"// imgui_state cutscene-skip toggles + fast_restart (debug-menu toggles)
 
@@ -145,8 +151,169 @@ static bool g_suppress_enter = false;
 static int g_skip_orbit_frames = 0;
 
 typedef void(__cdecl *stdControl_ReadControls_t)(void);
+// DirectInput scancodes the game actually uses, measured by logging stdControl_aKeyInfos while
+// each action was held on the keyboard -- not guessed. Injecting these same codes means the
+// user's own key bindings apply, and it works identically in menus, the hub and a race,
+// because it is the exact array the keyboard fills.
+// From the game's own manual (README.TXT, 'Star Wars: Episode 1 Racer Controls'). Note Down
+// arrow is PULL UP, not brake -- brake is S. The earlier probe mapped it as brake because the
+// arrow key was pressed when I asked for brake.
+#define VRK_ACCEL 0x11    // W        thrust
+#define VRK_BRAKE 0x1F    // S        brake
+#define VRK_PULLUP 0xD0   // Down     pull up
+#define VRK_NOSEDOWN 0xC8 // Up       nose down
+#define VRK_SLIDE 0x39    // Space    slide
+#define VRK_BOOST 0x2A    // LShift   boost
+#define VRK_ROLLL 0x1E    // A        roll left
+#define VRK_ROLLR 0x20    // D        roll right
+#define VRK_REPAIR 0x13   // R        repair
+#define VRK_VIEW 0x1D     // LCtrl    switch camera
+#define VRK_LOOKBACK 0x0F // Tab      look back
+#define VRK_LEFT 0xCB  // Left arrow
+#define VRK_RIGHT 0xCD // Right arrow
+#define VRK_UP 0xC8    // Up arrow (menu-up)
+#define VRK_ENTER 0x1C // Enter / confirm
+#define VRK_ESC 0x01   // Escape / pause
+
+// Press a key for this frame. aKeyInfos is the held state ReadKey returns; the press counter
+// carries the rising edge that menu code watches, so it is only bumped on a genuine 0->1.
+static void vr_hold_key(int dik, bool down) {
+    static bool was[528] = {};
+    if (dik < 0 || dik >= 528)
+        return;
+    if (down) {
+        if (!was[dik])
+            stdControl_g_aKeyPressCounter[dik] += 1;
+        stdControl_aKeyInfos[dik] = 1;
+    } else if (was[dik]) {
+        // Release it. Nothing else will: the memset that clears these arrays lives in
+        // stdControl_ReadControls_delta, which is dead code (ReadControls is hooked twice and
+        // the boostfix delta wins). Without this every injected key latched on permanently --
+        // Escape and Enter jammed down together, which made the menus unusable.
+        //
+        // Only keys WE set are cleared, so a real keyboard press of the same key is untouched.
+        stdControl_aKeyInfos[dik] = 0;
+    }
+    was[dik] = down;
+}
+
+// The front-end menus (single/multiplayer, settings) do NOT poll stdControl_aKeyInfos. They
+// consume key EVENTS through swrUI_HandleKeyEvent, with Windows virtual-key codes -- the
+// keyboard reaches them as Window_msg_default_handler -> swrUI_HandleKeyEvent(vk, 1). So the
+// scancode injection that drives the hub and racing is invisible to them, and they need the
+// event fired directly. Edge-triggered, with a repeat so a held stick keeps scrolling.
+typedef int(__cdecl *swrUI_HandleKeyEventFn2)(int, int);
+typedef void *(__cdecl *swrEvent_GetItemFn2)(int, int);
+#define VRVK_LEFT 0x25
+#define VRVK_UP 0x26
+#define VRVK_RIGHT 0x27
+#define VRVK_DOWN 0x28
+#define VRVK_RETURN 0x0D
+#define VRVK_ESCAPE 0x1B
+
+static void vr_menu_key(int vk, bool down, int slot) {
+    static bool was[8] = {};
+    static int repeat[8] = {};
+    if (slot < 0 || slot >= 8)
+        return;
+    bool fire = false;
+    if (down && !was[slot]) {
+        fire = true;
+        repeat[slot] = 22;// initial delay before auto-repeat, in frames
+    } else if (down && --repeat[slot] <= 0) {
+        fire = true;
+        repeat[slot] = 6;
+    }
+    if (fire) {
+        ((swrUI_HandleKeyEventFn2) swrUI_HandleKeyEvent_ADDR)(vk, 1);
+        ((swrUI_HandleKeyEventFn2) swrUI_HandleKeyEvent_ADDR)(vk, 0);
+    }
+    was[slot] = down;
+}
+
 void stdControl_ReadControls_boostfix_delta(void) {
     hook_call_original((stdControl_ReadControls_t) stdControl_ReadControls_ADDR);
+
+    // Fold the Quest controllers in on top of the keyboard, never replacing it: the arrays
+    // were just refilled by the original, so anything set here is what the game reads this
+    // frame. Steering is thresholded because the game takes digital arrow keys -- the analog
+    // stick value is preserved for a later pass at the joystick axis path.
+    if (vr_input_available()) {
+        const float steer = vr_input_steer();
+        const float stick_y = vr_input_stick_y();
+        const float deadzone = 0.35f;
+
+        // Analog path: tell the game a joystick exists so it reads axes at all (it never
+        // calls stdControl_ReadAxis in keyboard mode -- proved by the axis probe logging
+        // nothing), then write the stick straight into the axis array the game samples.
+        // aAxisPos is int[15]; the game's own scale is what ApplyAxisConfig set up, so the
+        // magnitude here is a first guess and the axis index is still to be confirmed from
+        // the [CTRL] log once the game starts querying them.
+        const bool analog = vr_analog_steering_enabled() != 0;
+        if (analog) {
+            joystick_detected = 1;
+            swrConfig_joystick_enabled = 1;
+            if (swrConfig_joystickNbAxis < 2)
+                swrConfig_joystickNbAxis = 2;
+            stdControl_aAxisPos[0] = (int) (steer * 1000.0f);
+            stdControl_aAxisPos[1] = (int) (-stick_y * 1000.0f);
+        }
+
+        // Up/Down arrows do double duty: pitch during a race, menu navigation everywhere
+        // else. Pick the stick by context using the game own in-race test -- the Jdge race
+        // manager event exists only while a race is running. Without this the hub and pause
+        // menus navigate from the RIGHT stick, which is where pitch lives, while the front-end
+        // menus navigate from the left.
+        const bool in_race =
+            ((swrEvent_GetItemFn2) swrEvent_GetItem_ADDR)(0x4a646765, 0) != nullptr;
+        // Up/Down arrows serve two jobs -- pitch while driving, menu navigation elsewhere --
+        // and the game has NO state flag that separates those two cases. Four candidates were
+        // measured across hub / race / pause / hub-after-quit:
+        //
+        //   Jdge race event      : non-null in every context, including the hangar
+        //   InRaceSpritesEnabled : 1 in every context
+        //   currentPlayer_Test   : 0 before your first race, then latches 1 forever
+        //   resultsScreenActive  : same latch
+        //
+        // Racing and standing-in-the-hub-after-quitting are indistinguishable by all of them,
+        // so no amount of further searching helps. Take whichever stick is pushed further
+        // instead: it needs no context, works in every menu, and the only side effect is that
+        // the left stick's vertical axis also pitches during a race -- an axis that otherwise
+        // does nothing, so it costs nothing.
+        const float ly = vr_input_stick_y();
+        const float ry = vr_input_pitch();
+        const float pitch = (fabsf(ly) > fabsf(ry)) ? ly : ry;
+        vr_hold_key(VRK_ACCEL, vr_input_throttle() > 0.15f);
+        vr_hold_key(VRK_BRAKE, vr_input_brake() > 0.15f);
+        // With analog on, the stick drives the axis; keep the key path off so the two do not
+        // fight each other.
+        vr_hold_key(VRK_LEFT, !analog && steer < -deadzone);
+        vr_hold_key(VRK_RIGHT, !analog && steer > deadzone);
+        // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
+        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
+        vr_hold_key(VRK_PULLUP, pitch < -deadzone);
+        vr_hold_key(VRK_BOOST, vr_input_boost() != 0);
+        vr_hold_key(VRK_SLIDE, vr_input_cancel() != 0);
+        vr_hold_key(VRK_VIEW, vr_input_view() != 0);
+        vr_hold_key(VRK_LOOKBACK, vr_input_lookback() != 0);
+        // Repair is right-stick-down. It shares that direction with pull-up, which is fine:
+        // holding repair while climbing is a legitimate thing to want mid-race.
+        vr_hold_key(VRK_REPAIR, vr_input_repair() != 0);
+        vr_hold_key(VRK_ROLLL, vr_input_roll_left() != 0);
+        vr_hold_key(VRK_ROLLR, vr_input_roll_right() != 0);
+        // Menu confirm/cancel ride the same buttons; the front end uses the event path below,
+        // and these scancodes mean nothing to it, so the two cannot collide.
+        vr_hold_key(VRK_ENTER, vr_input_boost() != 0);
+        vr_hold_key(VRK_ESC, vr_input_menu() != 0);
+
+        // Same intent again, as events, for the front-end menus.
+        vr_menu_key(VRVK_UP, stick_y > deadzone, 0);
+        vr_menu_key(VRVK_DOWN, stick_y < -deadzone, 1);
+        vr_menu_key(VRVK_LEFT, steer < -deadzone, 2);
+        vr_menu_key(VRVK_RIGHT, steer > deadzone, 3);
+        vr_menu_key(VRVK_RETURN, vr_input_boost() != 0, 4);
+        vr_menu_key(VRVK_ESCAPE, vr_input_cancel() != 0 || vr_input_menu() != 0, 5);
+    }
     if (g_suppress_enter) {
         if (stdControl_aKeyInfos[DIK_RETURN_KEY] != 0)
             stdControl_aKeyInfos[DIK_RETURN_KEY] = 0;// still held from the restart -> hide it

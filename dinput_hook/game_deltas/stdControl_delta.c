@@ -28,6 +28,7 @@ void stdControl_ReadControls_delta(void) {
     sithControl_msecFPS =
         1.0 / (double) (stdControl_curReadTime - stdControl_lastReadTime) * 1000.0;
     glfwPollEvents();
+
     stdControl_lastReadTime = stdControl_curReadTime;
 }
 

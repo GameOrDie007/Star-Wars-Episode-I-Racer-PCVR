@@ -1,4 +1,5 @@
 #include "imgui_utils.h"
+#include "vr_probe.h"
 #include "debug_ui.h"
 #include "n64_shader.h"
 
@@ -758,6 +759,34 @@ void imgui_Update() {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
+
+        // In VR the overlay goes into the VR 2D layer rather than the window, or it is visible on
+        // the monitor only -- which means taking the headset off to change any setting.
+        //
+        // That layer is at eye resolution, well above the window's. ImGui rasterises at
+        // DisplaySize * DisplayFramebufferScale, so scaling here renders it at the layer's
+        // resolution while leaving the logical layout (and mouse coordinates) untouched. Without
+        // it the panel draws window-sized into a much larger buffer and lands in a corner.
+        unsigned int vr_imgui_fbo = 0;
+        int vr_imgui_w = 0, vr_imgui_h = 0;
+        const bool imgui_to_vr = vr_imgui_target(&vr_imgui_fbo, &vr_imgui_w, &vr_imgui_h) != 0;
+        {
+            ImGuiIO &io = ImGui::GetIO();
+            if (imgui_to_vr && io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+                io.DisplayFramebufferScale = ImVec2((float) vr_imgui_w / io.DisplaySize.x,
+                                                    (float) vr_imgui_h / io.DisplaySize.y);
+                // Laid out for a monitor at arm's length; on a panel 1.4 m away the text is
+                // legible but small. Scales text and, through it, the widgets it sizes.
+                io.FontGlobalScale = vr_overlay_scale();
+            } else {
+                io.FontGlobalScale = 1.0f;
+            }
+            // Software cursor only while the F5 overlay is actually up. There is no OS cursor
+            // inside the headset, so one is needed to click anything -- but left on permanently it
+            // is a pointer floating in the world the entire time you are racing.
+            io.MouseDrawCursor = imgui_to_vr && show_imgui != 0;
+        }
+
         ImGui::NewFrame();
 
         // The FPS overlay is independent of the F5 debug menu (debug_ui_render gates that).
@@ -767,7 +796,14 @@ void imgui_Update() {
 
         ImGui::EndFrame();
         ImGui::Render();
+        GLint imgui_prev_fbo = 0;
+        if (imgui_to_vr) {
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &imgui_prev_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, vr_imgui_fbo);
+        }
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (imgui_to_vr)
+            glBindFramebuffer(GL_FRAMEBUFFER, (GLuint) imgui_prev_fbo);
     }
 }
 
@@ -2473,6 +2509,8 @@ static DebugPanel g_panel_pod_transforms = {
     .dev_only = true};
 static DebugPanel g_panel_pod_readout = {
     .category = "Inspect", .name = "Pod Readout", .draw = panel_pod_readout, .dev_only = true};
+static DebugPanel g_panel_vr_probe = {
+    .category = "VR", .name = "OpenVR Probe", .draw = vr_probe_draw_imgui, .dev_only = false};
 
 static void register_builtin_debug_panels() {
     debug_ui_register(&g_panel_fps);
@@ -2489,4 +2527,5 @@ static void register_builtin_debug_panels() {
     debug_ui_register(&g_panel_textures);
     debug_ui_register(&g_panel_pod_transforms);
     debug_ui_register(&g_panel_pod_readout);
+    debug_ui_register(&g_panel_vr_probe);
 }

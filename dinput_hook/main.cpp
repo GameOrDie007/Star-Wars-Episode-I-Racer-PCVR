@@ -153,6 +153,9 @@ HICON __stdcall LoadIconHook(HINSTANCE hInstance, LPCSTR lpIconName) {
     return nullptr;
 }
 
+#include <stdlib.h>// atexit
+#include "vr_probe.h"
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason != DLL_PROCESS_ATTACH)
         return TRUE;
@@ -164,6 +167,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     hook_log = fopen("hook.log", "wb");
 
     crash_logger_stage("DllMain");
+
+    // Shut the OpenVR session down on exit. Without this, SteamVR keeps believing a Scene
+    // application still owns the compositor, and the NEXT run blocks forever inside
+    // VR_InitInternal waiting for a slot that never frees -- the only cure being a SteamVR
+    // restart.
+    //
+    // atexit, not DLL_PROCESS_DETACH: detach runs under the loader lock and
+    // VR_ShutdownInternal joins its own threads, which is a deadlock waiting to happen.
+    // atexit handlers run before unload, outside the lock. (A force-kill still skips this
+    // -- nothing in-process can help there.)
+    atexit(vr_probe_shutdown);
 
     // GOG Version works like Steam Version
     // Steam Version gets initialized with dinput_hook.c: LoadIconA patched to DirectInputCreateA

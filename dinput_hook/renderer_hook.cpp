@@ -11,8 +11,10 @@
 #include "replacements.h"
 #include "stb_image.h"
 #include "texture_replacement.h"
+#include "vr_probe.h"
 
 extern "C" {
+#include <Engine/rdCamera.h>// rdCamera_BuildFOV (widen the engine cull frustum in VR)
 #include "./game_deltas/DirectX_delta.h"
 #include "./game_deltas/main_delta.h"
 #include "./game_deltas/rdMaterial_delta.h"
@@ -251,6 +253,465 @@ struct StreamRing {
     bool unavailable = false;
 };
 static StreamRing g_stream_ring;
+
+// ---- VR eye targets ---------------------------------------------------------------------
+// One resolved (non-MSAA) colour target per eye. These MUST be separate textures: Submit is
+// handed the texture NAME, so reusing a single texture for both eyes lets whichever eye was
+// rendered last appear in both -- a mono image, which will not fuse into depth.
+struct VrEyeTarget {
+    GLuint fbo = 0;
+    GLuint tex = 0;
+    int w = 0;
+    int h = 0;
+    bool captured = false;
+};
+static VrEyeTarget g_vr_eye_targets[2];
+
+// Size of the local player's pod in game units, used to derive the world scale from a real
+// dimension instead of judging stereo depth by eye.
+//
+// Measured in WORLD space, not from the raw mesh AABB. The AABB is in node-local space and the
+// node/model matrix may carry scale, so a normalised model reads wildly wrong -- the first attempt
+// did exactly that and reported a 3753-unit podracer. Transforming the corners by model_matrix
+// removes the question, and accumulating over every mesh of the model measures the whole vehicle
+// (both engines and the cockpit) rather than the largest single part.
+// The matrices the scene is CURRENTLY being drawn with, and whether we are inside a scene
+// pass. Both exist for the 2D overlays that are anchored to 3D positions -- lens flares on
+// light poles, the overhead racer place numbers. They are positioned by the game projecting a
+// world point to screen space with ITS projection, which in VR is not the projection the scene
+// was drawn with, so they drift away from whatever they are meant to sit on.
+static float g_vr_scene_view[16];
+static float g_vr_scene_proj[16];
+static bool g_vr_in_scene_pass = false;
+
+// Grouped by INSTANCE, not by model id. Locking to one MODELID is not enough: several racers can
+// share a pod model, and every one of them then accumulated into a single box. The symptom was a
+// logged pod centre 50,000 units from the camera while the extent still looked plausible -- two
+// pods at opposite ends of the track merged into one. Meshes of a single pod share a model-matrix
+// origin to within the pod's own size, so grouping on that separates the racers cleanly.
+#define VR_POD_GROUPS 16
+#define VR_POD_GROUP_RADIUS 200.0f// units; a pod is ~17, the racers are far further apart
+
+struct PodGroup {
+    float origin[3];
+    float mn[3];
+    float mx[3];
+};
+static PodGroup g_pod_groups[VR_POD_GROUPS];
+static int g_pod_group_count = 0;
+static float g_pod_extent_units = 0.0f;// finalised once per frame
+static float g_pod_distance_units = 0.0f;
+
+// Fold this frame's groups into the reported figures and start again. The pods move, so the bounds
+// are only meaningful within a single frame. The group NEAREST the camera is the one measured --
+// in cockpit or chase view that is the player's own pod.
+static void finalise_pod_measurement() {
+    const float *V = g_vr_scene_view;
+    const float camx = -(V[0] * V[12] + V[1] * V[13] + V[2] * V[14]);
+    const float camy = -(V[4] * V[12] + V[5] * V[13] + V[6] * V[14]);
+    const float camz = -(V[8] * V[12] + V[9] * V[13] + V[10] * V[14]);
+
+    int best = -1;
+    float best_d2 = 0.0f;
+    for (int g = 0; g < g_pod_group_count; g++) {
+        const float dx = g_pod_groups[g].origin[0] - camx;
+        const float dy = g_pod_groups[g].origin[1] - camy;
+        const float dz = g_pod_groups[g].origin[2] - camz;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        if (best < 0 || d2 < best_d2) {
+            best = g;
+            best_d2 = d2;
+        }
+    }
+
+    if (best >= 0) {
+        const PodGroup &p = g_pod_groups[best];
+        const float ex = p.mx[0] - p.mn[0];
+        const float ey = p.mx[1] - p.mn[1];
+        const float ez = p.mx[2] - p.mn[2];
+        const float longest = (ex > ey) ? ((ex > ez) ? ex : ez) : ((ey > ez) ? ey : ez);
+        if (longest > 0.0f) {
+            g_pod_extent_units = longest;
+            g_pod_distance_units = sqrtf(best_d2);
+        }
+    }
+    g_pod_group_count = 0;
+}
+
+// hook.log is what a user sends when reporting a problem, so the default must stay readable:
+// a short record of what was set up and anything that failed. The per-frame probes that were
+// invaluable while building this would bury that in thousands of lines, so they are gated
+// behind SWE1R_VR_VERBOSE=1 and can be turned on per report when something is genuinely
+// obscure.
+static bool vr_verbose(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        char v[8] = {0};
+        cached = (GetEnvironmentVariableA("SWE1R_VR_VERBOSE", v, sizeof(v)) > 0 && v[0] == '1')
+                     ? 1
+                     : 0;
+    }
+    return cached != 0;
+}
+
+// Per-frame record of what the FIRST eye streamed, so the second eye can reuse it.
+//
+// Only the view and projection differ between eye passes -- the MODEL matrix is identical, so
+// parse_display_list_commands produces byte-for-byte the same vertices both times. Without
+// this the whole scene is parsed and uploaded twice per frame, which is pure duplicated CPU
+// work in the exact place the frame budget is tight (~1200 meshes per eye, single-threaded).
+struct EyeStreamReuse {
+    int base;
+    int count;
+    rdMatrix44 model_matrix;
+};
+static std::unordered_map<const swrModel_Mesh *, EyeStreamReuse> g_eye_stream_reuse;
+static bool g_eye_reuse_armed = false;// true while drawing the second eye
+
+// ---- VR HUD layer ---------------------------------------------------------------------------
+// The game draws its HUD and menus from swrPlayerHUD_RenderAllViewports, which the engine calls
+// AFTER swrViewport_Render returns -- by which point both eyes have already been captured, so
+// none of it reaches the headset (confirmed: the dumped eye images contain the 3D scene and no
+// HUD whatsoever, while the monitor has both).
+//
+// It cannot simply be run once per eye: it ends in DrawTextEntries, a once-per-frame text flush
+// that also advances the letterbox animation on a real-time dt. Running it twice would
+// double-advance that and most likely drop the text the second time.
+//
+// So it is drawn ONCE into its own transparent layer, then composited into both eye targets and
+// the monitor. Keeping the HUD as a separate layer is also what a floating UI panel needs later:
+// to place it at a comfortable depth it has to exist independently of the scene.
+// Declared in the header but never given a generated thunk, so the original has to be reached
+// by casting its address -- the same pattern swrPlayerHUD_RenderDistanceText_delta uses.
+typedef void swrPlayerHUD_RenderAllViewports_t(void);
+
+static GLuint g_hud_fbo = 0;
+static GLuint g_hud_tex = 0;
+static int g_hud_w = 0;
+static int g_hud_h = 0;
+static GLuint g_hud_prog = 0;
+static GLuint g_hud_vao = 0;
+
+static bool vr_hud_layer_ensure(int w, int h) {
+    if (w <= 0 || h <= 0)
+        return false;
+    if (g_hud_fbo != 0 && g_hud_w == w && g_hud_h == h)
+        return true;
+
+    if (g_hud_fbo)
+        glDeleteFramebuffers(1, &g_hud_fbo);
+    if (g_hud_tex)
+        glDeleteTextures(1, &g_hud_tex);
+
+    glGenTextures(1, &g_hud_tex);
+    glBindTexture(GL_TEXTURE_2D, g_hud_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &g_hud_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_hud_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_hud_tex, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (hook_log) {
+        fprintf(hook_log, "[VR] hud layer %s status=0x%04x %dx%d tex=%u\n",
+                st == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE", (unsigned) st, w, h,
+                g_hud_tex);
+        fflush(hook_log);
+    }
+    g_hud_w = w;
+    g_hud_h = h;
+
+    if (g_hud_prog == 0) {
+        static const char *vs = "#version 330 core\n"
+                                "out vec2 uv;\n"
+                                "void main(){\n"
+                                "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+                                "  uv = p;\n"
+                                "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+                                "}\n";
+        // Scale about the centre, then apply the per-eye shift in screen space so the two
+        // controls stay independent: resizing the HUD must not change the amount of
+        // frustum compensation. At scale 1.0 this is exactly uv + shift, the behaviour
+        // that already fused correctly. Samples outside the layer are dropped rather than
+        // clamped, which would smear the edge pixels outward.
+        static const char *fs = "#version 330 core\n"
+                                "in vec2 uv;\n"
+                                "uniform sampler2D hud;\n"
+                                "uniform float u_shift;\n"
+                                "uniform float hud_scale;\n"
+                                "out vec4 c;\n"
+                                "void main(){\n"
+                                "  vec2 t = (uv - 0.5 + vec2(u_shift, 0.0)) / hud_scale + 0.5;\n"
+                                "  if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0)\n"
+                                "    discard;\n"
+                                "  c = texture(hud, t);\n"
+                                "}\n";
+        std::optional<GLuint> prog = compileProgram(1, &vs, 1, &fs);
+        if (hook_log) {
+            fprintf(hook_log, "[VR] hud composite shader %s\n",
+                    prog.has_value() ? "compiled" : "FAILED TO COMPILE");
+            fflush(hook_log);
+        }
+        if (!prog.has_value())
+            return false;
+        g_hud_prog = prog.value();
+        glGenVertexArrays(1, &g_hud_vao);
+    }
+    return st == GL_FRAMEBUFFER_COMPLETE;
+}
+
+extern "C" float vr_measured_pod_extent(void) {
+    return g_pod_extent_units;
+}
+
+extern "C" float vr_measured_pod_distance(void) {
+    return g_pod_distance_units;
+}
+
+// Which eye pass of this frame is running, for code that must act once per FRAME rather than
+// once per eye.
+static int g_vr_pass_index = 0;
+static int g_vr_pass_count = 1;
+
+extern "C" int vr_last_eye_pass(void) {
+    return g_vr_pass_index >= g_vr_pass_count - 1;
+}
+
+extern "C" int vr_second_eye_pass(void) {
+    return g_eye_reuse_armed ? 1 : 0;
+}
+
+extern "C" int vr_imgui_target(unsigned int *fbo, int *w, int *h) {
+    // Reuses the layer the game's own 2D is redirected into, so the overlay is composited and
+    // submitted by the same path -- quad layer for the headset, flat composite for the monitor.
+    if (!vr_is_active() || g_hud_fbo == 0 || g_hud_w <= 0 || g_hud_h <= 0)
+        return 0;
+    *fbo = g_hud_fbo;
+    *w = g_hud_w;
+    *h = g_hud_h;
+    return 1;
+}
+
+extern "C" GLuint vr_hud_layer_target(void) {
+    // Inside a scene pass this returns 0, so world-anchored overlays draw into the eye image
+    // with the rest of the 3D instead of being flattened onto the panel.
+    if (g_vr_in_scene_pass)
+        return 0;
+    static int logged = 0;
+    if (logged < 3 && hook_log && vr_verbose()) {
+        logged++;
+        fprintf(hook_log, "[VR] hud redirect asked: active=%d enabled=%d\n",
+                vr_is_active(), vr_hud_redirect_enabled());
+        fflush(hook_log);
+    }
+    if (!vr_is_active() || !vr_hud_redirect_enabled())
+        return 0;
+    GLint vp[4];
+    glGetIntegerv(GL_VIEWPORT, vp);
+    if (!vr_hud_layer_ensure(vp[2], vp[3]))
+        return 0;
+    return g_hud_fbo;
+}
+
+// Alpha-composite the HUD layer over one target. The layer starts fully transparent, so its
+// alpha ends up as the coverage the 2D drawing produced.
+static void vr_hud_composite(GLuint dst_fbo, int w, int h, float u_shift) {
+    // Say out loud whether this runs. Last time the call sat in a branch that never executed
+    // and I spent a round theorising about why its output looked wrong.
+    static int logged = 0;
+    if (logged < 6 && hook_log && vr_verbose()) {
+        logged++;
+        fprintf(hook_log, "[VR] hud composite: dst=%u %dx%d layer_fbo=%u prog=%u tex=%u%s\n",
+                dst_fbo, w, h, g_hud_fbo, g_hud_prog, g_hud_tex,
+                (g_hud_fbo == 0 || g_hud_prog == 0 || w <= 0 || h <= 0)
+                    ? "  -> SKIPPED"
+                    : "  -> drawing");
+        fflush(hook_log);
+    }
+    if (g_hud_fbo == 0 || g_hud_prog == 0 || w <= 0 || h <= 0)
+        return;
+
+    GLint prev_vp[4];
+    glGetIntegerv(GL_VIEWPORT, prev_vp);
+    const GLboolean blend_was = glIsEnabled(GL_BLEND);
+    const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean scissor_was = glIsEnabled(GL_SCISSOR_TEST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, dst_fbo);
+    glViewport(0, 0, w, h);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(g_hud_prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_hud_tex);
+    glUniform1i(glGetUniformLocation(g_hud_prog, "hud"), 0);
+    glUniform1f(glGetUniformLocation(g_hud_prog, "u_shift"), u_shift);
+    glUniform1f(glGetUniformLocation(g_hud_prog, "hud_scale"), vr_get_hud_scale());
+    glBindVertexArray(g_hud_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glDepthMask(GL_TRUE);
+    if (!blend_was)
+        glDisable(GL_BLEND);
+    if (depth_was)
+        glEnable(GL_DEPTH_TEST);
+    if (scissor_was)
+        glEnable(GL_SCISSOR_TEST);
+    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    invalidate_mesh_gl_state_cache();
+}
+
+// Redirect the whole HUD/menu pass into the transparent layer while VR is active.
+extern "C" void swrPlayerHUD_RenderAllViewports_delta(void) {
+    if (!vr_is_active()) {
+        hook_call_original((swrPlayerHUD_RenderAllViewports_t *)
+                           swrPlayerHUD_RenderAllViewports_ADDR);
+        return;
+    }
+
+    GLint vp[4];
+    glGetIntegerv(GL_VIEWPORT, vp);
+    if (true) {// list-building only; the actual 2D draws are redirected in std3D_DrawRenderList
+        hook_call_original((swrPlayerHUD_RenderAllViewports_t *)
+                           swrPlayerHUD_RenderAllViewports_ADDR);
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, g_hud_fbo);
+    glViewport(0, 0, g_hud_w, g_hud_h);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    hook_call_original((swrPlayerHUD_RenderAllViewports_t *)
+                           swrPlayerHUD_RenderAllViewports_ADDR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+    invalidate_mesh_gl_state_cache();
+}
+
+// The view matrix actually in force when each eye was blitted, plus how many passes each eye
+// got this frame. The periodic matrix log shows a correct stereo pair, yet the captured images
+// are ~30 degrees apart -- which can only mean the two captures happened at different moments.
+// Recording these AT THE BLIT ties the pixels and the matrix to the same instant.
+static float g_vr_capture_view[2][16] = {};
+static int g_vr_passes_this_frame[2] = {0, 0};
+
+// Write one eye's resolved image to a PPM next to the exe. PPM because it needs no encoder
+// and the two files can be compared directly; these are the exact pixels handed to the
+// compositor, so whatever one eye is missing will be missing here too.
+static void dump_fbo_ppm(const char *name, GLuint fbo, int w, int h);
+
+static void dump_eye_ppm(int eye) {
+    const VrEyeTarget &t = g_vr_eye_targets[eye];
+    if (t.fbo == 0 || t.w <= 0 || t.h <= 0)
+        return;
+    std::vector<unsigned char> buf((size_t) t.w * (size_t) t.h * 3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, t.fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, t.w, t.h, GL_RGB, GL_UNSIGNED_BYTE, buf.data());
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "vr_eye%d.ppm", eye);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    fprintf(f, "P6\n%d %d\n255\n", t.w, t.h);
+    // GL rows run bottom-up; write them in reverse so the file is the right way up.
+    for (int y = t.h - 1; y >= 0; y--)
+        fwrite(&buf[(size_t) y * (size_t) t.w * 3], 1, (size_t) t.w * 3, f);
+    fclose(f);
+    if (hook_log) {
+        fprintf(hook_log, "[VR] dumped %s (%dx%d tex=%u)\n", path, t.w, t.h, t.tex);
+        fflush(hook_log);
+    }
+}
+
+// Same, for any framebuffer -- used to capture what the 2D fallback actually grabs. If the
+// menu is black in the headset but fine on the monitor, this says whether the capture is
+// empty (wrong moment) or fine (a display problem instead).
+static void dump_fbo_ppm(const char *name, GLuint fbo, int w, int h) {
+    if (w <= 0 || h <= 0)
+        return;
+    std::vector<unsigned char> buf((size_t) w * (size_t) h * 3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glReadBuffer(fbo == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, buf.data());
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    FILE *f = fopen(name, "wb");
+    if (!f)
+        return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int y = h - 1; y >= 0; y--)
+        fwrite(&buf[(size_t) y * (size_t) w * 3], 1, (size_t) w * 3, f);
+    fclose(f);
+    if (hook_log) {
+        fprintf(hook_log, "[VR] dumped %s (%dx%d fbo=%u)\n", name, w, h, fbo);
+        fflush(hook_log);
+    }
+}
+
+// Per-pass draw counters, surfaced in the VR panel. Watching these while the ground vanishes
+// separates 'skipped during traversal' (count drops) from 'drawn but not visible' (count
+// steady) -- which is the fork every guess so far has failed to resolve.
+int g_vr_pass_mesh_count = 0;
+int g_vr_pass_vertex_count = 0;
+int g_vr_last_pass_meshes[2] = {0, 0};
+int g_vr_last_pass_verts[2] = {0, 0};
+
+static bool vr_eye_target_ensure(int eye, int width, int height) {
+    if (eye < 0 || eye > 1 || width <= 0 || height <= 0)
+        return false;
+    VrEyeTarget &t = g_vr_eye_targets[eye];
+    if (t.fbo != 0 && t.w == width && t.h == height)
+        return true;
+
+    if (t.fbo)
+        glDeleteFramebuffers(1, &t.fbo);
+    if (t.tex)
+        glDeleteTextures(1, &t.tex);
+
+    glGenTextures(1, &t.tex);
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &t.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (hook_log) {
+        fprintf(hook_log, "[VR] eye %d target %s status=0x%04x %dx%d tex=%u\n", eye,
+                st == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE", (unsigned) st,
+                width, height, t.tex);
+        fflush(hook_log);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    t.w = width;
+    t.h = height;
+    return st == GL_FRAMEBUFFER_COMPLETE;
+}
+
 
 static bool stream_ring_available() {
     StreamRing &ring = g_stream_ring;
@@ -615,6 +1076,66 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
         return;
 
     const auto &aabb = mesh->aabb;
+
+    // Accumulate the pod's world-space bounds while its meshes go past. Names are lowercase:
+    // anakin_pod, sebulba_pod, ... The first pod model seen is locked in and every later frame
+    // measures that same racer, so the twelve pods on track never merge into one huge box.
+    if ((int) model_id >= 0) {
+        const char *name = modelid_cstr[model_id];
+        if (name && strstr(name, "_pod") != nullptr) {
+            // Find the instance this mesh belongs to by its model-matrix origin, or start a new one.
+            const float ox = model_matrix.vD.x;
+            const float oy = model_matrix.vD.y;
+            const float oz = model_matrix.vD.z;
+            int grp = -1;
+            for (int g = 0; g < g_pod_group_count; g++) {
+                const float dx = g_pod_groups[g].origin[0] - ox;
+                const float dy = g_pod_groups[g].origin[1] - oy;
+                const float dz = g_pod_groups[g].origin[2] - oz;
+                if (dx * dx + dy * dy + dz * dz <=
+                    VR_POD_GROUP_RADIUS * VR_POD_GROUP_RADIUS) {
+                    grp = g;
+                    break;
+                }
+            }
+            if (grp < 0 && g_pod_group_count < VR_POD_GROUPS) {
+                grp = g_pod_group_count++;
+                g_pod_groups[grp].origin[0] = ox;
+                g_pod_groups[grp].origin[1] = oy;
+                g_pod_groups[grp].origin[2] = oz;
+                g_pod_groups[grp].mn[0] = g_pod_groups[grp].mx[0] = ox;
+                g_pod_groups[grp].mn[1] = g_pod_groups[grp].mx[1] = oy;
+                g_pod_groups[grp].mn[2] = g_pod_groups[grp].mx[2] = oz;
+            }
+
+            if (grp >= 0) {
+                PodGroup &p = g_pod_groups[grp];
+                for (int c = 0; c < 8; c++) {
+                    const float lx = (c & 1) ? aabb[3] : aabb[0];
+                    const float ly = (c & 2) ? aabb[4] : aabb[1];
+                    const float lz = (c & 4) ? aabb[5] : aabb[2];
+                    const float wx = lx * model_matrix.vA.x + ly * model_matrix.vB.x +
+                                     lz * model_matrix.vC.x + model_matrix.vD.x;
+                    const float wy = lx * model_matrix.vA.y + ly * model_matrix.vB.y +
+                                     lz * model_matrix.vC.y + model_matrix.vD.y;
+                    const float wz = lx * model_matrix.vA.z + ly * model_matrix.vB.z +
+                                     lz * model_matrix.vC.z + model_matrix.vD.z;
+                    if (wx < p.mn[0])
+                        p.mn[0] = wx;
+                    if (wy < p.mn[1])
+                        p.mn[1] = wy;
+                    if (wz < p.mn[2])
+                        p.mn[2] = wz;
+                    if (wx > p.mx[0])
+                        p.mx[0] = wx;
+                    if (wy > p.mx[1])
+                        p.mx[1] = wy;
+                    if (wz > p.mx[2])
+                        p.mx[2] = wz;
+                }
+            }
+        }
+    }
     // glDrawAABBLines({ aabb[0], aabb[1], aabb[2] }, { aabb[3], aabb[4], aabb[5] });
 
     if (!mesh->vertices)
@@ -962,6 +1483,21 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
     const bool cacheable = imgui_state.cache_meshes && g_active_cable_amplitude < 0.0f;
     const bool can_stream = imgui_state.stream_dynamic_meshes && stream_ring_available();
     if (cacheable) {
+        // Second eye: if the first already streamed this mesh at this exact model matrix, the
+        // vertices in the ring are still valid (the region is not recycled until the frame is
+        // presented), so point at them and skip the parse and the upload entirely.
+        if (g_eye_reuse_armed) {
+            const auto it = g_eye_stream_reuse.find(mesh);
+            if (it != g_eye_stream_reuse.end() &&
+                memcmp(&it->second.model_matrix, &model_matrix, sizeof(rdMatrix44)) == 0) {
+                bind_mesh_vao(g_stream_ring.vao);
+                glDrawArrays(GL_TRIANGLES, it->second.base, it->second.count);
+                g_vr_pass_mesh_count++;
+                g_vr_pass_vertex_count += it->second.count;
+                return;
+            }
+        }
+
         CachedMeshGeometry &cached = g_mesh_geometry_cache[mesh];
         const bool needs_rebuild =
             cached.vao == 0 || memcmp(&cached.model_matrix, &model_matrix, sizeof(rdMatrix44)) != 0;
@@ -980,6 +1516,8 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
                 bind_mesh_vao(g_stream_ring.vao);
                 mesh_first_vertex = stream_base;
                 mesh_vertex_count = (int) triangles.size();
+                g_eye_stream_reuse[mesh] = EyeStreamReuse{stream_base,
+                                                          (int) triangles.size(), model_matrix};
             } else {
                 if (cached.vao == 0) {
                     glGenVertexArrays(1, &cached.vao);
@@ -1026,8 +1564,13 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
         mesh_vertex_count = (int) triangles.size();
     }
     glDrawArrays(GL_TRIANGLES, mesh_first_vertex, mesh_vertex_count);
+    g_vr_pass_mesh_count++;
+    g_vr_pass_vertex_count += mesh_vertex_count;
 
-    if (imgui_state.HD_replacement && !environment_models_drawn) {
+    // Same guard as the IBL setup above: without a loaded skybox this renders six faces
+    // into an incomplete framebuffer every frame.
+    if (imgui_state.HD_replacement && !environment_models_drawn &&
+        envInfos.skybox.depthTexture != 0) {
         GLint old_viewport[4];
         glGetIntegerv(GL_VIEWPORT, old_viewport);
         glViewport(0, 0, 2048, 2048);
@@ -1038,6 +1581,22 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_CUBE_MAP_POSITIVE_X + faceIndex,
                                envInfos.skybox.GLCubeTexture, 0);
+
+        // Instrumentation (see the [FBO] line for default_framebuffer, which is COMPLETE).
+        // This env/IBL target is the remaining suspect for the GL_INVALID_FRAMEBUFFER_OPERATION
+        // spam: depthTexture is bound to GL_DEPTH_STENCIL_ATTACHMENT, which is only legal if
+        // it really is a depth-stencil format. Logged once per distinct status.
+        if (hook_log && vr_verbose()) {
+            static GLenum last_ibl_status = 0;
+            const GLenum ibl_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (ibl_status != last_ibl_status) {
+                last_ibl_status = ibl_status;
+                fprintf(hook_log, "[FBO] ibl_framebuffer %s status=0x%04x face=%d\n",
+                        ibl_status == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE",
+                        (unsigned) ibl_status, faceIndex);
+                fflush(hook_log);
+            }
+        }
 
         const swrViewport &vp = swrViewport_array[1];
 
@@ -1084,6 +1643,8 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
 
         // Reuses the VAO bound above (cached, ring or scratch); range must match that geometry.
         glDrawArrays(GL_TRIANGLES, mesh_first_vertex, mesh_vertex_count);
+    g_vr_pass_mesh_count++;
+    g_vr_pass_vertex_count += mesh_vertex_count;
 
         glBindFramebuffer(GL_FRAMEBUFFER, default_framebuffer);
         glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3]);
@@ -1236,6 +1797,10 @@ void debug_render_node(const swrViewport &current_vp, const swrModel_Node *node,
     } else if (node->type == NODE_SELECTOR) {
         const swrModel_NodeSelector *selector = (const swrModel_NodeSelector *) node;
         int child = selector->selected_child_node;
+        // VR: the engine chose this child from the POD's viewpoint, which is not where the
+        // player is looking. -1 means 'render every child', so borrow that path.
+        if (vr_render_all_selectors())
+            child = -1;
         switch (child) {
             case -2:
                 // dont render any child node
@@ -1263,7 +1828,309 @@ void debug_render_node(const swrViewport &current_vp, const swrModel_Node *node,
     g_weather_terrain_depth = prev_terrain_depth;
 }
 
+// ---- world-space light streaks ----------------------------------------------------------
+//
+// The game draws lens flares / light streaks as SCREEN-SPACE sprites: it projects a world point
+// with its own projection and stamps a sprite at the resulting 2D position, during the HUD pass.
+// In VR that projection is not the one either eye was rendered with, and the sprite lands on the
+// flat panel, so a flare slides off its lamp post as soon as you move your head.
+//
+// So: drop the game's registration (nothing screen-space is ever drawn), but keep the world
+// positions it was handing us, and draw them as real geometry inside each eye pass. There the
+// eye's own projection applies and the depth buffer decides visibility -- which is strictly
+// better than the original, whose CPU back-buffer occlusion test is documented as broken at
+// 24/32 bpp (see swrPlayerHUD.h), letting flares shine through walls.
+//
+// IMPORTANT: this renderer runs a GL 4.5 CORE context (Window_delta.c asks for it explicitly),
+// so there is no immediate mode. debug_render_sprites() below is dead code for exactly that
+// reason -- glBegin/glOrtho/glColor cannot draw anything here. Hence the VBO + shader.
+#define VR_MAX_STREAKS 40
+static float g_streak_pos[VR_MAX_STREAKS][3];
+static unsigned char g_streak_live[VR_MAX_STREAKS];
+static GLuint g_streak_prog = 0;
+static GLuint g_streak_vao = 0;
+static GLuint g_streak_vbo = 0;
+static GLint g_streak_u_viewproj = -1;
+static GLint g_streak_u_color = -1;
+static bool g_streak_setup_done = false;
+static bool g_streak_setup_failed = false;
+
+static const char *kStreakVert =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPos;\n"
+    "layout(location = 1) in vec2 aUV;\n"
+    "layout(location = 2) in float aIntensity;\n"
+    "uniform mat4 uViewProj;\n"
+    "out vec2 vUV;\n"
+    "out float vIntensity;\n"
+    "void main() {\n"
+    "    vUV = aUV;\n"
+    "    vIntensity = aIntensity;\n"
+    "    gl_Position = uViewProj * vec4(aPos, 1.0);\n"
+    "}\n";
+
+// Soft radial falloff, cubed: a warm core fading smoothly to nothing. Tried and rejected a
+// spiked starburst matching the vanilla sprite -- it is more faithful to 1999 and looks worse
+// in a headset, where a big screen-space cross reads as a flat overlay pasted on the world.
+// This reads as a lamp glowing at a distance, which is what it is.
+//
+// vIntensity carries the fog attenuation; premultiplied by alpha so the blend stays ONE/ONE.
+static const char *kStreakFrag =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "in float vIntensity;\n"
+    "uniform vec3 uColor;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "    float d = length(vUV * 2.0 - 1.0);\n"
+    "    float a = clamp(1.0 - d, 0.0, 1.0);\n"
+    "    a = a * a * a * vIntensity;\n"
+    "    FragColor = vec4(uColor * a, a);\n"
+    "}\n";
+
+// out = A * B, both column-major, as GL wants them.
+static void vr_mat4_mul(const float *A, const float *B, float *out) {
+    for (int c = 0; c < 4; c++) {
+        for (int r = 0; r < 4; r++) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; k++)
+                sum += A[k * 4 + r] * B[c * 4 + k];
+            out[c * 4 + r] = sum;
+        }
+    }
+}
+
+static bool vr_streaks_setup() {
+    if (g_streak_setup_done)
+        return !g_streak_setup_failed;
+    g_streak_setup_done = true;
+
+    const std::optional<GLuint> prog = compileProgram(1, &kStreakVert, 1, &kStreakFrag);
+    if (!prog.has_value()) {
+        g_streak_setup_failed = true;
+        return false;
+    }
+    g_streak_prog = prog.value();
+    g_streak_u_viewproj = glGetUniformLocation(g_streak_prog, "uViewProj");
+    g_streak_u_color = glGetUniformLocation(g_streak_prog, "uColor");
+
+    glGenVertexArrays(1, &g_streak_vao);
+    glGenBuffers(1, &g_streak_vbo);
+    glBindVertexArray(g_streak_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_streak_vbo);
+    glBufferData(GL_ARRAY_BUFFER, VR_MAX_STREAKS * 6 * 6 * sizeof(float), nullptr,
+                 GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          (void *) (3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          (void *) (5 * sizeof(float)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    fprintf(hook_log, "VR: light-streak billboards ready (program %u)\n", g_streak_prog);
+    fflush(hook_log);
+    return true;
+}
+
+// Called at the end of each eye's scene pass, while that eye's matrices are still current.
+static void vr_draw_light_streaks() {
+    if (!vr_is_active() || !vr_suppress_flares() || !vr_world_flares())
+        return;
+
+    int count = 0;
+    for (int i = 0; i < VR_MAX_STREAKS; i++)
+        count += g_streak_live[i] ? 1 : 0;
+    if (count == 0)
+        return;
+    if (!vr_streaks_setup())
+        return;
+
+    // Camera basis in world space. The view matrix is world->view, so the rows of its rotation
+    // are the camera axes; in column-major storage that is elements 0/4/8 and 1/5/9.
+    const float *V = g_vr_scene_view;
+    const float rx = V[0], ry = V[4], rz = V[8];
+    const float ux = V[1], uy = V[5], uz = V[9];
+    const float base_h = vr_flare_size_units();
+    const float angular_tan = vr_flare_angular_tan();
+
+    // Camera position, to size each billboard by its distance (below).
+    const float camx = -(V[0] * V[12] + V[1] * V[13] + V[2] * V[14]);
+    const float camy = -(V[4] * V[12] + V[5] * V[13] + V[6] * V[14]);
+    const float camz = -(V[8] * V[12] + V[9] * V[13] + V[10] * V[14]);
+
+    // The engine's own linear fog, so a distant light fades into the haze exactly as the
+    // geometry around it does. Without this the billboards punch through fog at full
+    // brightness -- and because they are angular-sized, the further away they are the BIGGER
+    // and more wrong they look. That was the 'shows up through the fog badly' report.
+    const bool fog_on = imgui_state.enable_fog && (GameSettingFlags & 0x40) == 0;
+    const float fog_span = fogEnd - fogStart;
+
+    static float verts[VR_MAX_STREAKS * 6 * 6];
+    int v = 0;
+    for (int i = 0; i < VR_MAX_STREAKS; i++) {
+        if (!g_streak_live[i])
+            continue;
+        const float cx = g_streak_pos[i][0];
+        const float cy = g_streak_pos[i][1];
+        const float cz = g_streak_pos[i][2];
+
+        // Hold a roughly constant ANGULAR size, the way the original screen-space sprites did.
+        // A fixed world size is physically honest and visually useless: track lights are often
+        // kilometres away, where a 2 m quad is far below one pixel. Measured on Boonta, the
+        // nearest light was 7770 units (~3.2 km) out. Below the crossover distance the flare
+        // keeps its real size, so lights you pass close to do not balloon.
+        const float dx = cx - camx, dy = cy - camy, dz = cz - camz;
+        const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        const float angular = dist * angular_tan;
+        const float h = (angular > base_h) ? angular : base_h;
+
+        // 1 at the fog start, 0 at the fog end -- the fraction of the light that survives.
+        float vis = 1.0f;
+        if (fog_on && fog_span > 0.0f) {
+            vis = (fogEnd - dist) / fog_span;
+            vis = (vis < 0.0f) ? 0.0f : ((vis > 1.0f) ? 1.0f : vis);
+        }
+        if (vis <= 0.0f)
+            continue;// fully fogged: nothing to draw
+
+        // Corner offsets (su, sv) in the camera plane, with matching UVs.
+        const float su[6] = {-1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f};
+        const float sv[6] = {-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f};
+        for (int k = 0; k < 6; k++) {
+            verts[v++] = cx + (rx * su[k] + ux * sv[k]) * h;
+            verts[v++] = cy + (ry * su[k] + uy * sv[k]) * h;
+            verts[v++] = cz + (rz * su[k] + uz * sv[k]) * h;
+            verts[v++] = su[k] * 0.5f + 0.5f;
+            verts[v++] = sv[k] * 0.5f + 0.5f;
+            verts[v++] = vis;
+        }
+    }
+
+    float viewproj[16];
+    vr_mat4_mul(g_vr_scene_proj, g_vr_scene_view, viewproj);
+
+    static bool logged_draw = false;
+    static int log_attempts = 0;
+    if (!logged_draw && ++log_attempts < 600) {
+        // Where does the first one actually land? "Did you see a glow?" is a judgement call in a
+        // dark cockpit; normalised device coordinates are not. On screen means x and y within
+        // [-1,1] with a positive clip w. Negative w means it is behind the eye, and huge |x|,|y|
+        // means these positions are not in the space the scene is drawn in.
+        // Survey ALL of them, not just the first. The game registers every light on the track at
+        // load, most of which are behind you at any moment, so one sample says nothing. What
+        // matters is whether ANY are in front of the eye and on screen.
+        //
+        // The pod centre is logged beside them as a control: it is known to be in true world space
+        // (the scale measurement uses it), so if the streaks are in a different space or scale it
+        // shows up as an implausible separation between the two.
+        int in_front = 0, on_screen = 0, best = -1;
+        float best_dist = 0.0f, best_ndc[3] = {0.0f, 0.0f, 0.0f}, best_w = 0.0f;
+        for (int i = 0; i < VR_MAX_STREAKS; i++) {
+            if (!g_streak_live[i])
+                continue;
+            const float wx = g_streak_pos[i][0];
+            const float wy = g_streak_pos[i][1];
+            const float wz = g_streak_pos[i][2];
+            float clip[4];
+            for (int r = 0; r < 4; r++)
+                clip[r] = wx * viewproj[0 * 4 + r] + wy * viewproj[1 * 4 + r] +
+                          wz * viewproj[2 * 4 + r] + viewproj[3 * 4 + r];
+            if (clip[3] <= 0.0f)
+                continue;
+            in_front++;
+            const float iw = 1.0f / clip[3];
+            const float nx = clip[0] * iw, ny = clip[1] * iw, nz = clip[2] * iw;
+            const bool visible = nx >= -1.0f && nx <= 1.0f && ny >= -1.0f && ny <= 1.0f &&
+                                 nz >= -1.0f && nz <= 1.0f;
+            on_screen += visible ? 1 : 0;
+            if (best < 0 || clip[3] < best_dist) {
+                best = i;
+                best_dist = clip[3];
+                best_ndc[0] = nx;
+                best_ndc[1] = ny;
+                best_ndc[2] = nz;
+                best_w = clip[3];
+            }
+        }
+
+        // Camera position in world space: -R^T * t, recovered from the view matrix.
+        const float *Vm = g_vr_scene_view;
+        const float camx = -(Vm[0] * Vm[12] + Vm[1] * Vm[13] + Vm[2] * Vm[14]);
+        const float camy = -(Vm[4] * Vm[12] + Vm[5] * Vm[13] + Vm[6] * Vm[14]);
+        const float camz = -(Vm[8] * Vm[12] + Vm[9] * Vm[13] + Vm[10] * Vm[14]);
+
+        fprintf(hook_log,
+                "VR: streaks %d live, %d in front, %d on screen\n"
+                "VR:   camera world [%.1f %.1f %.1f]\n"
+                "VR:   pod %.0f units away, spans %.0f units\n",
+                count, in_front, on_screen, camx, camy, camz, g_pod_distance_units,
+                g_pod_extent_units);
+        if (best >= 0) {
+            fprintf(hook_log,
+                    "VR:   nearest streak %d world [%.1f %.1f %.1f] w %.1f ndc [%.2f %.2f %.2f]\n",
+                    best, g_streak_pos[best][0], g_streak_pos[best][1], g_streak_pos[best][2],
+                    best_w, best_ndc[0], best_ndc[1], best_ndc[2]);
+        }
+        fprintf(hook_log, "VR: drawing %d light-streak billboards, half-size >= %.1f units\n"
+                          "VR:   fog %s  start %.0f  end %.0f units\n",
+                count, base_h, fog_on ? "on" : "off", fogStart, fogEnd);
+        fflush(hook_log);
+        if (on_screen > 0 || log_attempts >= 599)
+            logged_draw = true;
+    }
+
+    GLint prev_prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
+
+    glUseProgram(g_streak_prog);
+    glUniformMatrix4fv(g_streak_u_viewproj, 1, GL_FALSE, viewproj);
+    // Warm: these read as sodium/incandescent track lights, and the warm cast is what
+    // looked right in the headset against the orange Tatooine sky.
+    glUniform3f(g_streak_u_color, 1.0f, 0.93f, 0.75f);
+
+    glBindVertexArray(g_streak_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_streak_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, v * sizeof(float), verts);
+
+    // The HUD/2D pass runs immediately after this, so every bit of state has to go back exactly
+    // as it was found -- a leaked blend mode or cull flag would show up as a corrupted HUD, a long
+    // way from here.
+    const GLboolean had_blend = glIsEnabled(GL_BLEND);
+    const GLboolean had_depth = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean had_cull = glIsEnabled(GL_CULL_FACE);
+    GLint blend_src = GL_SRC_ALPHA, blend_dst = GL_ONE_MINUS_SRC_ALPHA;
+    GLint depth_mask = GL_TRUE;
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blend_src);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blend_dst);
+    glGetIntegerv(GL_DEPTH_WRITEMASK, &depth_mask);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);// additive; the shader premultiplies by alpha
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);// a glow must not occlude what is behind it
+    glDisable(GL_CULL_FACE);
+
+    glDrawArrays(GL_TRIANGLES, 0, v / 6);
+
+    glDepthMask((GLboolean) depth_mask);
+    glBlendFunc((GLenum) blend_src, (GLenum) blend_dst);
+    if (!had_blend)
+        glDisable(GL_BLEND);
+    if (!had_depth)
+        glDisable(GL_DEPTH_TEST);
+    if (had_cull)
+        glEnable(GL_CULL_FACE);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(prev_prog);
+}
+
 #ifndef NDEBUG
+
 void debug_render_sprites() {
     fprintf(hook_log, "debug_render_sprites\n");
     fflush(hook_log);
@@ -1376,8 +2243,59 @@ int current_msaa_samples = 0;
 int current_fb_width = 0;
 int current_fb_height = 0;
 
-void swrViewport_Render_Hook(int x) {
+// One eye's worth of scene. Runs twice per frame in VR, once flat -- see the
+// swrViewport_Render_Hook wrapper below.
+static void swrViewport_Render_Eye(int x) {
+    // The pod's world bounds are only meaningful within one frame, and both eyes traverse the
+    // same pod, so fold and reset on the first eye only.
+    if (!vr_second_eye_pass())
+        finalise_pod_measurement();
+
+    // Anything drawn through the render list DURING a scene pass is anchored to the 3D world
+    // (flares, light streaks, place numbers) and must stay in the eye image so it lands per-eye
+    // in the right place. Only 2D drawn OUTSIDE a scene pass -- HUD, menus, cutscenes -- goes
+    // to the flat panel.
+    g_vr_in_scene_pass = true;
     begin_texture_replacement();
+
+    // VR: the engine culls and clips against a frustum built from the POD camera's fov and
+    // has no idea the head turned, so geometry you look at by turning your head can already
+    // have been discarded. Widen that frustum for the duration of this pass. rdCamera_BuildFOV
+    // recomputes the clip planes from fov; the projection we actually render with comes from
+    // the runtime, so this affects culling only. Restored at the end of the function.
+    g_vr_pass_mesh_count = 0;
+    g_vr_pass_vertex_count = 0;
+
+    float vr_saved_fov = 0.0f;
+    bool vr_fov_widened = false;
+    {
+        const float boost = vr_get_cull_fov_boost();
+        if (vr_is_active() && boost > 1.0f && rdCamera_pCurCamera != nullptr) {
+            vr_saved_fov = rdCamera_pCurCamera->fov;
+            float widened = vr_saved_fov * boost;
+            if (widened > 175.0f)
+                widened = 175.0f;
+            const rdClipFrustum *cf_before = rdCamera_pCurCamera->pClipFrustum;
+            const float lp_before = cf_before ? cf_before->leftPlane : 0.0f;
+            const float rp_before = cf_before ? cf_before->rightPlane : 0.0f;
+            rdCamera_pCurCamera->fov = widened;
+            const int build_ok = rdCamera_BuildFOV(rdCamera_pCurCamera);
+            vr_fov_widened = true;
+            static bool logged_fov = false;
+            if (!logged_fov && hook_log) {
+                logged_fov = true;
+                const rdClipFrustum *cf = rdCamera_pCurCamera->pClipFrustum;
+                fprintf(hook_log,
+                        "[VR] cull-fov: canvas=%p fov %.2f -> %.2f BuildFOV=%d  planes L/R "
+                        "%.4f/%.4f -> %.4f/%.4f  T/B %.4f/%.4f  zNear=%.4f\n",
+                        (void *) rdCamera_pCurCamera->canvas, vr_saved_fov, widened, build_ok,
+                        lp_before, rp_before, cf ? cf->leftPlane : 0.0f,
+                        cf ? cf->rightPlane : 0.0f, cf ? cf->topPlane : 0.0f,
+                        cf ? cf->bottomPlane : 0.0f, cf ? cf->zNear : 0.0f);
+                fflush(hook_log);
+            }
+        }
+    }
 
     GLint viewport[4];
     glGetIntegerv(GL_VIEWPORT, viewport);
@@ -1418,10 +2336,32 @@ void swrViewport_Render_Hook(int x) {
 
         const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
         glDrawBuffers(1, &draw_buffer);
+
+        // Instrumentation: completeness is never checked anywhere in the mod, yet a normal
+        // run logs thousands of GL_INVALID_FRAMEBUFFER_OPERATION while still looking correct
+        // on screen. Log the real status once per (re)build so the upcoming stereo eye
+        // targets can be told apart from a pre-existing problem. Note GL_DEPTH_COMPONENT32
+        // above is not a format GL guarantees is renderable (16/24/32F are) -- prime suspect.
+        if (hook_log) {
+            const GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            fprintf(hook_log, "[FBO] default_framebuffer %s status=0x%04x %dx%d msaa=%d\n",
+                    fb_status == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE",
+                    (unsigned) fb_status, width, height, current_msaa_samples);
+            fflush(hook_log);
+        }
     }
 
     if (default_framebuffer != 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, default_framebuffer);
+        // glClear obeys the depth mask, the colour mask and the scissor box. A pass that ends
+        // with depth writes disabled (transparent geometry does exactly that) makes the NEXT
+        // pass clear silently do nothing -- so the second eye renders against the first eye
+        // depth buffer, most of its geometry fails the depth test, and you get a washed-out
+        // background with fragments of scenery poking through where they happen to be nearer.
+        // Harmless in the flat game, which only ever renders one pass per frame.
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDisable(GL_SCISSOR_TEST);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
 
@@ -1489,12 +2429,26 @@ void swrViewport_Render_Hook(int x) {
             projD = -2.0f * far_dist * n / (far_dist - n);
         }
     }
-    const rdMatrix44 proj_mat{
+    rdMatrix44 proj_mat{
         {mirrored ? -xscale : xscale, 0, 0, 0},
         {0, yscale, 0, 0},
         {0, 0, projC, -1},
         {0, 0, projD, 0},
     };
+
+    // VR: replace the flat projection with this eye's asymmetric off-axis frustum. The
+    // headset FOV and lens centre are the runtime's to decide, not ours -- and using the
+    // game's symmetric projection for both eyes is precisely what stops the image fusing.
+    // The runtime's matrix needs a finite far plane where the game runs an infinite one, so
+    // push it far enough out that the fog horizon hides it.
+    {
+        float eye_proj[16];
+        const float vr_far = (projC != -1.0f && vp.far_clipping > n)
+                                 ? vp.far_clipping * imgui_state.console_far_scale
+                                 : 100000.0f;
+        if (vr_get_eye_projection(vr_get_current_eye(), n, vr_far, eye_proj))
+            memcpy(&proj_mat.vA.x, eye_proj, sizeof(eye_proj));
+    }
 
     rdMatrix44 view_mat;
     rdMatrix_Copy44_34(&view_mat, &rdCamera_pCurCamera->view_matrix);
@@ -1509,18 +2463,81 @@ void swrViewport_Render_Hook(int x) {
     rdMatrix44 view_mat_corrected;
     rdMatrix_Multiply44(&view_mat_corrected, &view_mat, &rotation);
 
+    // VR: fold the head rotation into the view matrix. vr_get_head_rotation() returns
+    // identity whenever there is no valid pose or the F5 toggle is off, so this line is a
+    // no-op for the flat game. Rotation only -- the pilot never translates out of the pod.
+    {
+        rdMatrix44 eye_view;
+        vr_get_eye_view(vr_get_current_eye(), &eye_view.vA.x);
+        rdMatrix44 view_mat_vr;
+        rdMatrix_Multiply44(&view_mat_vr, &view_mat_corrected, &eye_view);
+        view_mat_corrected = view_mat_vr;
+    }
+
+    // Dump the actual per-eye matrices. Both eyes draw identical geometry (verified via the
+    // pass counters with culling off), so whatever removes geometry from one eye lives here.
+    // Logged once per eye, plus the view matrix every 600 frames since it changes with the
+    // pod's heading -- which is what the symptom tracks.
+    if (vr_is_active() && hook_log) {
+        const int e = vr_get_current_eye();
+        static bool logged_proj[2] = {false, false};
+        static long view_ticks[2] = {0, 0};
+        if (e >= 0 && e < 2) {
+            const float *p = &proj_mat.vA.x;
+            const float *v = &view_mat_corrected.vA.x;
+            if (!logged_proj[e]) {
+                logged_proj[e] = true;
+                fprintf(hook_log,
+                        "[VR] eye %d PROJ col-major:\n"
+                        "      %+9.5f %+9.5f %+9.5f %+9.5f\n"
+                        "      %+9.5f %+9.5f %+9.5f %+9.5f\n"
+                        "      %+9.5f %+9.5f %+9.5f %+9.5f\n"
+                        "      %+9.5f %+9.5f %+9.5f %+9.5f\n",
+                        e, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10],
+                        p[11], p[12], p[13], p[14], p[15]);
+                fflush(hook_log);
+            }
+            if ((view_ticks[e]++ % 600) == 0) {
+                fprintf(hook_log,
+                        "[VR] eye %d VIEW col-major (tick %ld):\n"
+                        "      %+9.4f %+9.4f %+9.4f %+9.4f\n"
+                        "      %+9.4f %+9.4f %+9.4f %+9.4f\n"
+                        "      %+9.4f %+9.4f %+9.4f %+9.4f\n"
+                        "      %+9.4f %+9.4f %+9.4f %+9.4f\n",
+                        e, view_ticks[e] - 1, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                        v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+                fflush(hook_log);
+            }
+        }
+    }
+
+    if (vr_is_active()) {
+        memcpy(g_vr_scene_view, &view_mat_corrected.vA.x, sizeof(g_vr_scene_view));
+        memcpy(g_vr_scene_proj, &proj_mat.vA.x, sizeof(g_vr_scene_proj));
+    }
+
     rdMatrix44 model_mat;
     rdMatrix_SetIdentity44(&model_mat);
 
     // skybox and ibl
-    if (imgui_state.HD_replacement && !environment_setuped) {
-        if (!skybox_initialized) {
-            PushDebugGroup("Setuping skybox");
-            setupSkybox(envInfos.skybox);
-            skybox_initialized = true;
-            PopDebugGroup();
-        }
+    if (imgui_state.HD_replacement && !skybox_initialized) {
+        PushDebugGroup("Setuping skybox");
+        setupSkybox(envInfos.skybox);
+        skybox_initialized = true;
+        PopDebugGroup();
+    }
 
+    // setupSkybox() bails on the first missing face via an early return, before it ever
+    // creates depthTexture -- and assets/textures/skybox/ does not ship with the release, so
+    // the bail is the normal case, not the exception. depthTexture == 0 is therefore the
+    // reliable "skybox never loaded" sentinel.
+    //
+    // Running the IBL path anyway attaches a GLCubeTexture whose faces were never allocated,
+    // leaving ibl_framebuffer GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT (0x8cd6). Every draw into
+    // it then fails: ~3500 GL_INVALID_FRAMEBUFFER_OPERATION per session, plus six cubemap
+    // faces of wasted render work per frame, for reflections that cannot appear regardless.
+    if (imgui_state.HD_replacement && !environment_setuped &&
+        envInfos.skybox.depthTexture != 0) {
         PushDebugGroup("Setuping IBL");
 
         // render env to cubemap
@@ -1585,6 +2602,48 @@ void swrViewport_Render_Hook(int x) {
     invalidate_mesh_gl_state_cache();
     std3D_SetRenderState_delta(Std3DRenderState(temp_renderState));
 
+    // World-space light streaks go in HERE, not at the end of this function. Everything below
+    // blits default_framebuffer outwards: first into this eye's texture (what the headset gets),
+    // then into framebuffer 0 (what the monitor gets). Drawing after those blits put the flares on
+    // the desktop mirror only -- they were visible on screen and absent in the headset, because the
+    // eye's copy had already been taken. The scene and its depth are complete in this buffer now,
+    // so the billboards composite over it and depth-test against it correctly.
+    if (default_framebuffer != 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, default_framebuffer);
+
+    // Weather particles: the 3D scene and its depth are complete in this buffer, so the sim draws
+    // here to composite over the scene and depth-test against it, where our GL state changes cannot
+    // corrupt the scene render. TickAndDraw self-gates on whether the game asked for weather this
+    // frame (it no-ops otherwise), so calling it per viewport is safe.
+    //
+    // This used to run AFTER the blits below, with framebuffer 0 bound, which put rain and snow on
+    // the desktop mirror only -- never in the headset. Harmless before VR, since flat play draws
+    // straight to the window; invisible in VR for exactly the same reason the light streaks were.
+    swrWeather_TickAndDraw(&proj_mat, &view_mat_corrected);
+
+    vr_draw_light_streaks();
+
+    // ---- VR: capture this eye -----------------------------------------------------------
+    // Blit into THIS eye's own resolved target. Submission is deferred to frame end:
+    // swrViewport_Render runs more than once per frame, and submitting from here meant each
+    // eye was submitted repeatedly, the extras rejected as AlreadySubmitted (108).
+    //
+    // default_framebuffer is MSAA and an MSAA -> single-sample blit may neither scale nor
+    // filter, hence the matching rects and GL_NEAREST. The compositor rescales to the eye.
+    if (vr_is_active() && default_framebuffer != 0) {
+        const int eye = vr_get_current_eye();
+        if (vr_eye_target_ensure(eye, width, height)) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, default_framebuffer);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_vr_eye_targets[eye].fbo);
+            glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            g_vr_eye_targets[eye].captured = true;
+            memcpy(g_vr_capture_view[eye], &view_mat_corrected.vA.x, sizeof(float) * 16);
+            g_vr_passes_this_frame[eye]++;
+        }
+    }
+
     if (default_framebuffer != 0) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, default_framebuffer);
@@ -1593,11 +2652,6 @@ void swrViewport_Render_Hook(int x) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    // Weather particles: now that the 3D scene (incl. its depth) is in the default framebuffer, run
-    // our particle sim + draw here so it composites over the scene, depth-tests against it, and our
-    // GL state changes can't corrupt the scene render. TickAndDraw self-gates on whether the game
-    // asked for weather this frame (it no-ops otherwise), so this is safe to call every viewport.
-    swrWeather_TickAndDraw(&proj_mat, &view_mat_corrected);
 
     if (imgui_state.enable_picking_texture_when_hovering) {
         // read hovered pixel
@@ -1617,10 +2671,57 @@ void swrViewport_Render_Hook(int x) {
         }
     }
 
+    {
+        const int e = vr_get_current_eye();
+        if (e >= 0 && e < 2) {
+            g_vr_last_pass_meshes[e] = g_vr_pass_mesh_count;
+            g_vr_last_pass_verts[e] = g_vr_pass_vertex_count;
+        }
+    }
+
+    if (vr_fov_widened && rdCamera_pCurCamera != nullptr) {
+        rdCamera_pCurCamera->fov = vr_saved_fov;
+        rdCamera_BuildFOV(rdCamera_pCurCamera);
+    }
+
+    g_vr_in_scene_pass = false;
+
     end_texture_replacement();
 }
 
-// swrViewport_Render_Hook (above) renders the 3D scene with a Hor+ projection: it holds the 4:3
+// Draws the scene once per eye. This is a hook_replace of the game's swrViewport_Render, so
+// the game calls it once and never knows the body ran twice.
+//
+// Running the body twice is safe because it is almost entirely idempotent: it rebuilds its
+// own matrices, resets environment_models_drawn, and pairs begin/end_texture_replacement.
+// The one exception is swrWeather_TickAndDraw, whose particle sim therefore advances twice
+// per frame in VR -- rain falls at 2x speed. Cosmetic, and fixed properly by passing it a
+// halved dt once stereo is settled.
+void swrViewport_Render_Hook(int x) {
+    // Open the runtime frame and locate the eyes BEFORE drawing, so each pass uses the
+    // current head pose and the render sits inside the runtime's frame bracket.
+    vr_begin_frame();
+
+    const int eyes = vr_eye_count();
+    for (int pass = 0; pass < eyes; pass++) {
+        // Pass 0 records what it streams; pass 1 reuses it rather than rebuilding identical
+        // geometry. Cleared each frame because the ring region rotates on present.
+        if (pass == 0) {
+            g_eye_stream_reuse.clear();
+            g_eye_reuse_armed = false;
+        } else {
+            g_eye_reuse_armed = true;
+        }
+        vr_set_current_eye(vr_eye_for_pass(pass));
+        g_vr_pass_index = pass;
+        g_vr_pass_count = eyes;
+        swrViewport_Render_Eye(x);
+    }
+    g_eye_reuse_armed = false;
+    vr_set_current_eye(VR_EYE_LEFT);
+}
+
+// swrViewport_Render_Eye (above) renders the 3D scene with a Hor+ projection: it holds the 4:3
 // vertical FOV constant across aspect ratios and applies the user FOV slider (imgui_state.fov_scale).
 // The 2D overlays drawn on top -- lens flares, light streaks, weather, and the HUD distance/name
 // labels -- are placed by the game's swrViewport_ProjectToScreen (rdMatrix44_model_MVP), which does
@@ -1659,6 +2760,37 @@ void swrViewport_ProjectToScreen_delta(void *viewport, rdVector4 *worldPos, floa
     const int h = swrDisplay_screenHeight;
     if (w <= 0 || h <= 0 || *outScreenX == PROJECT_OFFSCREEN_SENTINEL)
         return;
+
+    // In VR the scene is drawn with the runtime's asymmetric per-eye frustum, so the game's own
+    // projection -- and the Hor+ correction below, which assumes it -- put these overlays in
+    // the wrong place, drifting further toward the edges. Redo the projection with the matrices
+    // the scene was actually drawn with.
+    // NOT gated on g_vr_in_scene_pass: these are projected during the HUD pass
+    // (swrPlayerHUD_RenderAllViewports), after the scene has finished. The scene matrices
+    // published during the pass are still the right ones for this frame.
+    if (vr_is_active()) {
+        const float *V = g_vr_scene_view;
+        const float *Pm = g_vr_scene_proj;
+        float vx = worldPos->x, vy = worldPos->y, vz = worldPos->z;
+        if (!pointIsCameraRelative) {
+            const float x0 = vx, y0 = vy, z0 = vz;
+            vx = V[0] * x0 + V[4] * y0 + V[8] * z0 + V[12];
+            vy = V[1] * x0 + V[5] * y0 + V[9] * z0 + V[13];
+            vz = V[2] * x0 + V[6] * y0 + V[10] * z0 + V[14];
+        }
+        const float cx4 = Pm[0] * vx + Pm[4] * vy + Pm[8] * vz + Pm[12];
+        const float cy4 = Pm[1] * vx + Pm[5] * vy + Pm[9] * vz + Pm[13];
+        const float cw4 = Pm[3] * vx + Pm[7] * vy + Pm[11] * vz + Pm[15];
+        if (cw4 <= 0.0001f) {
+            *outScreenX = PROJECT_OFFSCREEN_SENTINEL;// behind the eye
+            return;
+        }
+        const float ndc_x = cx4 / cw4;
+        const float ndc_y = cy4 / cw4;
+        *outScreenX = (ndc_x * 0.5f + 0.5f) * (float) w;
+        *outScreenY = (1.0f - (ndc_y * 0.5f + 0.5f)) * (float) h;
+        return;// the Hor+ re-scale below is for the flat projection only
+    }
 
     const float design_aspect = 4.0f / 3.0f;
     const float fov_scale = imgui_state.fov_scale > 0.0f ? imgui_state.fov_scale : 1.0f;
@@ -1754,19 +2886,122 @@ static void limit_framerate(int target_fps) {
     }
 }
 
+// Lens flares, light streaks and the overhead place numbers are all WORLD-ANCHORED 2D: the
+// game projects a 3D point to a screen position and draws a sprite there, during the HUD pass.
+// In VR that pass lands on the flat panel, so they sit on a floating screen instead of out in
+// the world -- which is why the numbers slide off the racers the moment you turn your head, and
+// why a flare never sits on its lamp post.
+//
+// Correcting the projection is not enough; they would still be painted on the panel. Drawing
+// them properly means re-doing them as world-space billboards inside each eye pass, which is a
+// rewrite of the effect rather than a fix. Until then, suppressing them is the honest option.
+//
+// Three separate mechanisms produce what looks like one effect, and only the last two matter:
+//   swrConfig_VIDEO_LENSFLARE  - does NOT gate any of this; setting it changed nothing
+//   swrPlayerHUD_RenderWorldSprites - the overhead place numbers
+//   InitLightStreak (swrModel) - the glowing orbs on track lights
+typedef void(__cdecl *InitLightStreak_t)(int, rdVector3 *);
+extern "C" void InitLightStreak_delta(int index, rdVector3 *position) {
+    // Capture ALWAYS, whatever the toggles say. The game registers its streaks once per track, from
+    // swrModel_LoadAllLightStreaks at load time -- not per frame. Capturing only while suppression
+    // was on meant that if the setting was off at load, the table stayed empty for the whole race
+    // and turning it on later could never recover: the registrations had already been and gone.
+    if (position != nullptr && index >= 0 && index < VR_MAX_STREAKS) {
+        g_streak_pos[index][0] = position->x;
+        g_streak_pos[index][1] = position->y;
+        g_streak_pos[index][2] = position->z;
+        g_streak_live[index] = 1;
+        // One line, once: if the billboards never appear this says whether the game handed us
+        // any positions at all, which splits "not captured" from "captured but not drawn".
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            fprintf(hook_log, "VR: first light streak captured, slot %d at %.1f %.1f %.1f\n", index,
+                    position->x, position->y, position->z);
+            fflush(hook_log);
+        }
+    }
+
+    // Drop the registration so the game's own screen-space sprite is never drawn; the billboards
+    // replace it. Passing it through as well would draw both.
+    if (vr_is_active() && vr_suppress_flares())
+        return;
+    hook_call_original((InitLightStreak_t) InitLightStreak_ADDR, index, position);
+}
+
+// The game clears its streak table between tracks; mirror that, or lights from the last
+// track hang in the air on the next one.
+typedef void(__cdecl *ResetLightStreakSprites_t)(void);
+extern "C" void ResetLightStreakSprites_delta(void) {
+    memset(g_streak_live, 0, sizeof(g_streak_live));
+    hook_call_original((ResetLightStreakSprites_t) ResetLightStreakSprites_ADDR);
+}
+
+typedef void(__cdecl *swrPlayerHUD_RenderWorldSprites_t)(void *, int);
+extern "C" void swrPlayerHUD_RenderWorldSprites_delta(void *viewport, int secondaryPass) {
+    if (vr_is_active() && vr_suppress_flares())
+        return;
+    hook_call_original(
+        (swrPlayerHUD_RenderWorldSprites_t) swrPlayerHUD_RenderWorldSprites_ADDR, viewport,
+        secondaryPass);
+}
+
 extern "C" int stdDisplay_Update_Hook() {
     if (swrDisplay_SkipNextFrameUpdate == 1) {
         swrDisplay_SkipNextFrameUpdate = 0;
         return 0;
     }
 
+    // Probe: which DIK scancodes is the game seeing? stdControl_ReadControls is hooked TWICE
+    // (the boostfix delta wins), so this lives here, in a path that definitely runs. Keys are
+    // DirectInput scancodes written by the GLFW callback in Window_delta.c, which means Quest
+    // input can be injected as the same codes and inherit the user existing bindings.
+    if (hook_log && vr_verbose()) {
+        static int prev_first = -2;
+        static unsigned long kt = 0;
+        static int klogged = 0;
+        kt++;
+        int held[8];
+        int n = 0;
+        for (int i = 0; i < 528 && n < 8; i++)
+            if (stdControl_aKeyInfos[i])
+                held[n++] = i;
+        const int first = (n > 0) ? held[0] : -1;
+        if (n > 0 && (first != prev_first || (kt % 120) == 0) && klogged < 60) {
+            klogged++;
+            fprintf(hook_log, "[KEY] t=%lu held:", kt);
+            for (int i = 0; i < n; i++)
+                fprintf(hook_log, " %d (0x%02x)", held[i], held[i]);
+            for (int a = 0; a < 15; a++)
+                if (stdControl_aAxisPos[a])
+                    fprintf(hook_log, "  axis%d=%d", a, stdControl_aAxisPos[a]);
+            fprintf(hook_log, "\n");
+            fflush(hook_log);
+        }
+        prev_first = first;
+    }
+
+    // Cutscenes and the Smush player never reach swrViewport_Render, so no runtime frame was
+    // opened for them and nothing was presented -- the headset just held the previous image.
+    // This is idempotent, so the scene path opening it first is fine.
+    vr_begin_frame();
+
+    // PCVR probe: sample the HMD pose as early in the frame as possible. Tracking only --
+    // this does not touch the camera and submits nothing to the compositor.
+    vr_probe_update();
+
 
     // Runtime vsync toggle (default on, matching the glfwSwapInterval(1) set at GL open). Applied
     // here so it can be flipped from the imgui graphics settings while profiling.
+    // In VR the headset is the clock: xrWaitFrame blocks until the runtime wants the next
+    // frame. Syncing to the DESKTOP on top of that just clamps us to the slower of the two --
+    // a 60 Hz monitor caps a 90 Hz headset at 60. So vsync is forced off whenever VR is live,
+    // and the user toggle only applies to flat play.
+    const bool want_vsync = imgui_state.vsync && !vr_is_active();
     static bool applied_vsync = true;
-    if (imgui_state.vsync != applied_vsync) {
-        glfwSwapInterval(imgui_state.vsync ? 1 : 0);
-        applied_vsync = imgui_state.vsync;
+    if (want_vsync != applied_vsync) {
+        glfwSwapInterval(want_vsync ? 1 : 0);
+        applied_vsync = want_vsync;
     }
 
     begin_texture_replacement();
@@ -1783,6 +3018,147 @@ extern "C" int stdDisplay_Update_Hook() {
         value = 0;
     }
     glFinish();
+
+    // VR: if no eye was submitted this frame, the game is in a menu, a cutscene or the Smush
+    // player -- none of which go through the 3D scene path. Without this the compositor just
+    // keeps re-displaying the last race frame and the headset appears frozen on glitched
+    // geometry. Submit the finished desktop image flat to both eyes instead.
+    // Both eyes captured -> submit the real stereo pair, exactly once each. Otherwise the
+    // frame never reached the 3D path (menu, cutscene, Smush) so fall back to the flat
+    // desktop image in both eyes.
+    if (vr_is_active() && g_vr_eye_targets[0].captured && g_vr_eye_targets[1].captured) {
+        // Fold the 2D layer into both eyes, and onto the monitor (which no longer receives it
+        // directly once the render-list draws are redirected). Must happen BEFORE the submit
+        // and before the dump, so what we send and what we inspect both include the HUD.
+        // Each eye gets the layer nudged by its own principal-point offset, so the 2D fuses
+        // into one image instead of two. The monitor is a plain flat view -- no shift.
+        if (vr_should_dump_eyes()) {
+            dump_eye_ppm(0);
+            dump_eye_ppm(1);
+            dump_fbo_ppm("vr_hud_layer.ppm", g_hud_fbo, g_hud_w, g_hud_h);
+            if (hook_log) {
+                for (int e = 0; e < 2; e++) {
+                    const float *v = g_vr_capture_view[e];
+                    fprintf(hook_log,
+                            "[VR] capture eye %d passes=%d view fwd=[%+.4f %+.4f %+.4f] "
+                            "pos=[%+.2f %+.2f %+.2f]\n",
+                            e, g_vr_passes_this_frame[e], v[2], v[6], v[10], v[12], v[13],
+                            v[14]);
+                }
+                fflush(hook_log);
+            }
+            vr_clear_dump_eyes();
+        }
+        vr_submit_eye(VR_EYE_LEFT, g_vr_eye_targets[0].tex);
+        vr_submit_eye(VR_EYE_RIGHT, g_vr_eye_targets[1].tex);
+
+    } else if (false) {// retired: the head-locked 2D quad covers menus, HUD and cutscenes.
+        // This grabbed the backbuffer and sent it to BOTH eyes unshifted. Once the monitor
+        // composite started painting the 2D onto that same backbuffer, a cutscene showed
+        // three images at once: the quad's fused copy plus this path's two unfused ones.
+        static GLuint fb_fbo = 0;
+        static GLuint fb_tex = 0;
+        static int fb_w = 0, fb_h = 0;
+
+        int vp[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        const int w = vp[2], h = vp[3];
+
+        if (w > 0 && h > 0) {
+            if (w != fb_w || h != fb_h) {
+                if (fb_fbo)
+                    glDeleteFramebuffers(1, &fb_fbo);
+                if (fb_tex)
+                    glDeleteTextures(1, &fb_tex);
+                glGenTextures(1, &fb_tex);
+                glBindTexture(GL_TEXTURE_2D, fb_tex);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             NULL);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glGenFramebuffers(1, &fb_fbo);
+                glBindFramebuffer(GL_FRAMEBUFFER, fb_fbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                       fb_tex, 0);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                fb_w = w;
+                fb_h = h;
+            }
+
+            // Read the real backbuffer: at this point it holds the finished frame, menus and
+            // imgui included. Single-sample both sides, so a 1:1 GL_NEAREST blit is valid.
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            glReadBuffer(GL_BACK);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb_fbo);
+            glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (vr_should_dump_eyes()) {
+                dump_fbo_ppm("vr_menu_backbuffer.ppm", 0, w, h);
+                dump_fbo_ppm("vr_menu_captured.ppm", fb_fbo, w, h);
+                vr_clear_dump_eyes();
+            }
+            vr_submit_both(fb_tex);
+        }
+    }
+
+    // Do the L/R comparison here rather than asking a human in a headset to read two live
+    // counters at the instant the ground blinks out. If the second pass skips geometry the
+    // counts diverge; if the geometry is drawn in both eyes and only one eye fails to show it,
+    // they stay equal. Either way the answer ends up in hook.log.
+    if (vr_is_active() && hook_log && vr_verbose()) {
+        static int diverge_logged = 0;
+        static long diverge_frames = 0;
+        static long total_frames = 0;
+        const int dm = g_vr_last_pass_meshes[1] - g_vr_last_pass_meshes[0];
+        const int dv = g_vr_last_pass_verts[1] - g_vr_last_pass_verts[0];
+        total_frames++;
+        if (dm != 0 || dv != 0) {
+            diverge_frames++;
+            if (diverge_logged < 20) {
+                diverge_logged++;
+                fprintf(hook_log,
+                        "[VR] pass divergence: meshes L=%d R=%d (%+d)  verts L=%d R=%d (%+d)\n",
+                        g_vr_last_pass_meshes[0], g_vr_last_pass_meshes[1], dm,
+                        g_vr_last_pass_verts[0], g_vr_last_pass_verts[1], dv);
+                fflush(hook_log);
+            }
+        }
+        if ((total_frames % 600) == 0) {
+            fprintf(hook_log,
+                    "[VR] pass summary: cull=%d  %ld of %ld frames diverged; now meshes L=%d R=%d "
+                    "verts L=%d R=%d\n",
+                    (int) imgui_state.cull_meshes, diverge_frames, total_frames,
+                    g_vr_last_pass_meshes[0],
+                    g_vr_last_pass_meshes[1], g_vr_last_pass_verts[0], g_vr_last_pass_verts[1]);
+            fflush(hook_log);
+        }
+    }
+
+    g_vr_eye_targets[0].captured = false;
+    g_vr_eye_targets[1].captured = false;
+    g_vr_passes_this_frame[0] = 0;
+    g_vr_passes_this_frame[1] = 0;
+    // Hand the frame's 2D to the runtime as a head-locked quad. Unconditional: menus and
+    // cutscenes never produce eye textures, and they are exactly the content that most needs
+    // to stay put in front of the viewer rather than ride the head-tracked scene. Compositing
+    // into the eyes did the opposite, and needed a hand-rolled per-eye shift to fuse at all.
+    if (vr_is_active() && g_hud_fbo != 0) {
+        vr_set_2d_layer(g_hud_tex, g_hud_w, g_hud_h);
+        // The monitor no longer receives the 2D directly (the render-list draws are
+        // redirected), so it still needs the flat composite. No per-eye shift on a monitor.
+        vr_hud_composite(0, g_hud_w, g_hud_h, 0.0f);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, g_hud_fbo);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    vr_frame_end();// clear the submit flag only now that the whole frame is done
 
     stream_ring_end_frame();// fence the ring region just written before this frame is presented
     glfwSwapBuffers(glfwGetCurrentContext());
@@ -1979,6 +3355,9 @@ extern "C" void DrawTextEntries_delta(void) {
 }
 
 extern "C" void init_renderer_hooks() {
+
+    // PCVR probe (Milestone A). Inert if SteamVR or a headset is absent.
+    vr_probe_init();
 
     // ========================================
     // Hooks required for renderer replacement
@@ -2339,6 +3718,21 @@ extern "C" void init_renderer_hooks() {
     // swrPlayerHUD_RenderDistanceText (hooked by address; not reimplemented) reuses the game's own
     // projection/occlusion/fade and only redirects the text it draws -- via swrText_CreateTextEntry2
     // -- to the racer's name. Single-player is untouched (redirect only when multiplayer_enabled).
+
+    hook_function("InitLightStreak", (uint32_t) InitLightStreak_ADDR,
+                  (uint8_t *) InitLightStreak_delta);
+
+    hook_function("ResetLightStreakSprites", (uint32_t) ResetLightStreakSprites_ADDR,
+                  (uint8_t *) ResetLightStreakSprites_delta);
+
+    hook_function("swrPlayerHUD_RenderWorldSprites",
+                  (uint32_t) swrPlayerHUD_RenderWorldSprites_ADDR,
+                  (uint8_t *) swrPlayerHUD_RenderWorldSprites_delta);
+
+    hook_function("swrPlayerHUD_RenderAllViewports",
+                  (uint32_t) swrPlayerHUD_RenderAllViewports_ADDR,
+                  (uint8_t *) swrPlayerHUD_RenderAllViewports_delta);
+
     hook_function("swrPlayerHUD_RenderDistanceText", (uint32_t) swrPlayerHUD_RenderDistanceText_ADDR,
                   (uint8_t *) swrPlayerHUD_RenderDistanceText_delta);
     // swrText_CreateTextEntry2 is reimplemented (already registered in hook_generated.c), so a plain

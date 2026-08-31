@@ -1,3 +1,8 @@
+> **This is the PCVR fork.** It adds stereo rendering, head tracking and Quest controller
+> support to the mod below, via OpenXR. See **[PCVR_README.md](PCVR_README.md)** for what it
+> does, how to install it and what is still broken. Everything else in this README is the
+> upstream project's, unchanged.
+
 # Star Wars Episode 1 Racer Decompilation Project
 
 The goal of this repository is to document and re-implement some functions of the original game to enable the modding community.
