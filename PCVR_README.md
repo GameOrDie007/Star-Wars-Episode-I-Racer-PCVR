@@ -1,4 +1,4 @@
-# SWE1R PCVR
+# Star Wars Episode I Racer PCVR
 
 VR support for **Star Wars Episode I: Racer** (1999 PC release), built as a layer on top of the
 [SW_RACER_RE](https://github.com/tim-tim707/SW_RACER_RE) community improvement mod.
