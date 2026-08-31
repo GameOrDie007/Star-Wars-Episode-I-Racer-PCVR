@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include "../hook_helper.h"
+#include "../vr_probe.h"// vr_is_active / vr_suppress_flares
 #include "../imgui_utils.h" // imgui_state.show_pod_names (the debug-menu toggle)
 #include "../ui_transform.h" // ui_project_px_to_design (resolution-independent label placement)
 
@@ -68,6 +69,10 @@ static bool g_mpNameRedirect = false;
 static bool g_mpNameSecondaryPass = false;
 
 void swrPlayerHUD_RenderDistanceText_delta(void *viewport, bool secondaryPass) {
+    // Same problem as the flares: these labels are world-anchored 2D drawn in the HUD pass,
+    // so in VR they ride the flat panel and slide off the racers as soon as the head moves.
+    if (vr_is_active() && vr_suppress_flares())
+        return;
     if (!imgui_state.show_pod_names) {
         // Toggle off: draw nothing (no overhead labels in SP or MP). Skipping the original is safe
         // -- player_sprite_pixel_pos is only consumed by swrPlayerHUD_SampleOcclusion, which feeds

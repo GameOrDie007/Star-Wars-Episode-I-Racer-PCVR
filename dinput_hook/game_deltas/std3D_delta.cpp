@@ -7,6 +7,7 @@
 extern "C" {
 #include <macros.h>
 #include "std3D_delta.h"
+#include "../renderer_hook.h"// vr_hud_layer_target
 #include <globals.h>
 #include <math.h>
 #include <Platform/std3D.h>
@@ -242,7 +243,33 @@ void std3D_DrawRenderList_delta(LPDIRECT3DTEXTURE2 pTex, Std3DRenderState rdflag
         color[2] = tmp;
     }
 
+    // VR: send this into the HUD layer instead of the scene target. Every 2D element (HUD,
+    // menus, text, the hub overlays) reaches the GPU through here, so this catches all of them
+    // no matter when the game flushes its lists. Returns 0 outside VR, leaving the flat game
+    // completely untouched.
+    const GLuint hud_fbo = vr_hud_layer_target();
+    GLint prev_fb = 0;
+    if (hud_fbo != 0) {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
+        glBindFramebuffer(GL_FRAMEBUFFER, hud_fbo);
+        // The 2D path blends COLOUR only and never writes meaningful alpha, so the layer's
+        // alpha would stay at the cleared 0 and the composite would draw nothing at all --
+        // which is exactly the symptom: a perfectly rendered layer that is invisible when
+        // blended. Keep the colour factors the game chose, but accumulate coverage in alpha.
+        if (glIsEnabled(GL_BLEND)) {
+            GLint src_rgb = GL_SRC_ALPHA;
+            GLint dst_rgb = GL_ONE_MINUS_SRC_ALPHA;
+            glGetIntegerv(GL_BLEND_SRC_RGB, &src_rgb);
+            glGetIntegerv(GL_BLEND_DST_RGB, &dst_rgb);
+            glBlendFuncSeparate((GLenum) src_rgb, (GLenum) dst_rgb, GL_ONE,
+                                GL_ONE_MINUS_SRC_ALPHA);
+        }
+    }
+
     renderer_drawRenderList(verticesCount, aVerticies, indexCount, lpwIndices);
+
+    if (hud_fbo != 0)
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint) prev_fb);
 }
 
 // 0x0048a450

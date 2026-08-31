@@ -21,6 +21,8 @@ extern FILE *hook_log;
 }
 
 #include "../hook_helper.h"
+#include "../renderer_hook.h"// vr_second_eye_pass
+#include "../vr_probe.h"// vr_is_active, vr_weather_size_mul, vr_weather_streak_mul
 #include "../imgui_utils.h" // imgui_state.fov_scale
 
 // =============================================================================================
@@ -304,20 +306,26 @@ static void spawn_particle(WeatherParticle *p, float fov) {
 
 // Append one particle (point or streak) to the batch given its projected head.
 static void append_particle(const rdVector3 *world, float hx, float hy, float wz, float view_w) {
-    float half = (g_is_rain ? WPART_SIZE_K_RAIN : WPART_SIZE_K_SNOW) * g_sh / view_w;
-    if (half < WPART_SIZE_MIN)
-        half = WPART_SIZE_MIN;
-    if (half > WPART_SIZE_MAX)
-        half = WPART_SIZE_MAX;
+    // In VR the whole size range scales together, so the clamps stay meaningful.
+    const float vr_mul = vr_is_active() ? vr_weather_size_mul() : 1.0f;
+    float half = (g_is_rain ? WPART_SIZE_K_RAIN : WPART_SIZE_K_SNOW) * g_sh / view_w * vr_mul;
+    if (half < WPART_SIZE_MIN * vr_mul)
+        half = WPART_SIZE_MIN * vr_mul;
+    if (half > WPART_SIZE_MAX * vr_mul)
+        half = WPART_SIZE_MAX * vr_mul;
 
     // Tail = the particle's apparent past position relative to the camera. Two terms: its own fall
     // (velocity * dt * the per-track stretch, so rain trails long and snow short) PLUS the camera's
     // translation this frame (a fixed motion-blur length, so even low-stretch snow streaks when the
     // pod moves fast and rain rakes toward the camera / focus of expansion).
+    // Both terms shorten together in VR: a long thin sliver is what reads as shimmer once the
+    // image is stretched across a headset FOV and put through streaming compression.
+    const float sk = vr_is_active() ? vr_weather_streak_mul() : 1.0f;
+    const float blur = WPART_MOTION_BLUR * sk;
     const rdVector3 tail_world = {
-        world->x + g_vx * g_dt * g_stretch + g_cam_disp.x * WPART_MOTION_BLUR,
-        world->y + g_cam_disp.y * WPART_MOTION_BLUR,
-        world->z + g_vz * g_dt * g_stretch + g_cam_disp.z * WPART_MOTION_BLUR};
+        world->x + g_vx * g_dt * g_stretch * sk + g_cam_disp.x * blur,
+        world->y + g_cam_disp.y * blur,
+        world->z + g_vz * g_dt * g_stretch * sk + g_cam_disp.z * blur};
     float tx, ty, twz, tvw;
     if (weather_project(&tail_world, &tx, &ty, &twz, &tvw)) {
         const float dxs = hx - tx;
@@ -613,7 +621,12 @@ void swrWeather_TickAndDraw(const rdMatrix44 *proj, const rdMatrix44 *view) {
     }
 
     const bool wanted = g_weather_wanted;
-    g_weather_wanted = false;
+    // Release the once-per-frame flag on the FINAL eye only. This function runs once per eye
+    // in VR, and clearing it on the first eye left every later eye with wanted == false, so it
+    // returned early and drew nothing: snow in one eye only, and none at all on the desktop
+    // mirror, which shows the last eye blitted out.
+    if (vr_last_eye_pass())
+        g_weather_wanted = false;
     const bool weather_active = swrWeather_enabled && swrWeather_particleCap > 0;
     if (!wanted || (!weather_active && !g_weather_fading)) {
         // Weather idle: forget the last camera position. g_camera_prev only advances while we tick, so
@@ -634,7 +647,11 @@ void swrWeather_TickAndDraw(const rdMatrix44 *proj, const rdMatrix44 *view) {
     }
 
     const float fov = imgui_state.fov_scale > 0.0f ? imgui_state.fov_scale : 1.0f;
-    g_dt = (float) swrRace_deltaTimeSecs;
+    // Tick once, draw twice. In VR the scene is rendered once per eye, so this function runs
+    // twice a frame -- and with a live dt each time the particle sim advanced at double rate,
+    // making rain and snow fall twice as fast. Zeroing the timestep on the second eye lets
+    // everything draw again from the same state without integrating it a second time.
+    g_dt = vr_second_eye_pass() ? 0.0f : (float) swrRace_deltaTimeSecs;
     g_vx = swrWeather_velocityX;
     g_vz = swrWeather_velocityY;
     g_stretch = swrWeather_stretchFactor;

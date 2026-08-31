@@ -192,6 +192,23 @@ fullScreenTextureShader get_or_compile_fullscreenTextureShader() {
 }
 
 extern "C" __declspec(dllexport) void renderer_drawSmushFrame(const SmushImage *image) {
+    // Cutscenes reach neither the 3D path nor the 2D render list, so they used to land in the
+    // scene target and double. Draw them into the 2D layer, which is now submitted as a
+    // head-locked quad every frame -- so they fuse, and they stop following head movement.
+    const GLuint smush_layer = vr_hud_layer_target();
+    GLint smush_prev_fb = 0;
+    if (smush_layer != 0) {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &smush_prev_fb);
+        glBindFramebuffer(GL_FRAMEBUFFER, smush_layer);
+    }
+    struct SmushRestore {
+        GLuint layer;
+        GLint prev;
+        ~SmushRestore() {
+            if (layer != 0)
+                glBindFramebuffer(GL_FRAMEBUFFER, (GLuint) prev);
+        }
+    } smush_restore{smush_layer, smush_prev_fb};
     int w, h;
     glfwGetFramebufferSize(glfwGetCurrentContext(), &w, &h);
 
