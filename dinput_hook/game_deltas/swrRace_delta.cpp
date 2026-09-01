@@ -128,9 +128,18 @@ void __cdecl swrRace_ResolvePodCollision_delta(swrRace* player) {
     // for every pod on this machine, so without the flag test all eleven other racers would
     // vibrate the player's hands. speedLoss is the engine's own measure of the hit and is
     // zero when nothing was struck. vr_haptic_impact rate-limits and no-ops without VR.
-    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0 &&
-        player->speedLoss > 0.0f)
-        vr_haptic_impact(player->speedLoss);
+    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
+        if (player->speedLoss > 0.0f)
+            vr_haptic_impact(player->speedLoss);
+        // Wall and terrain contact. wallPushback is the correction the engine applies to
+        // shove the pod off a surface, so its magnitude tracks how hard you are grinding
+        // along it. Separate scale and rate limiter from pod impacts: a scrape is
+        // sustained where a pod hit is a single event, and they must not mask each other.
+        const rdVector3 &w = player->wallPushback;
+        const float push = sqrtf(w.x * w.x + w.y * w.y + w.z * w.z);
+        if (push > 0.0f)
+            vr_haptic_wall(push);
+    }
 }
 
 // --- Ground dust/splash effect: fix the AI-full-LOD contention -------------------------------------

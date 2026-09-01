@@ -157,6 +157,10 @@ void vr_haptic_pulse(float amplitude, float duration_ms);
 // Pod-to-pod impact, driven by the engine's own speedLoss. Rate-limited internally --
 // ResolvePodCollision runs every physics step, so an uncapped pulse is a buzz, not a hit.
 void vr_haptic_impact(float speed_loss);
+// Wall / terrain scrape, from swrRace.wallPushback. Own scale and rate limiter.
+void vr_haptic_wall(float push);
+// A one-off pulse at a given amplitude, for discrete events such as boost engaging.
+void vr_haptic_event(float amplitude, float duration_ms);
 
 // Non-zero while the game's 2D UI tree is being drawn, i.e. a menu is up. See
 // swrUI_ProcessMouse_delta: the game has no state flag separating menus from racing, but

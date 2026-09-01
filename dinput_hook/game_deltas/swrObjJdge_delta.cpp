@@ -319,6 +319,15 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
         vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
         vr_hold_key(VRK_PULLUP, pitch < -deadzone);
+        // A short kick when boost engages. Suppressed while a menu is up, because the same
+        // button confirms menu selections and a buzz on every menu click is noise.
+        {
+            static bool boost_was = false;
+            const bool boost_now = vr_input_boost() != 0;
+            if (boost_now && !boost_was && !vr_menu_context_active())
+                vr_haptic_event(0.55f, 120.0f);
+            boost_was = boost_now;
+        }
         vr_hold_key(VRK_BOOST, vr_input_boost() != 0);
         // B does double duty: Slide while racing, Back while a menu is up. Two users
         // reported no way out of a race or a menu without reaching for the keyboard, and
@@ -357,7 +366,12 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_menu_key(VRVK_LEFT, menu_x < -deadzone, 2);
         vr_menu_key(VRVK_RIGHT, menu_x > deadzone, 3);
         vr_menu_key(VRVK_RETURN, vr_input_boost() != 0, 4);
-        vr_menu_key(VRVK_ESCAPE, vr_input_cancel() != 0 || vr_input_menu() != 0, 5);
+        // Gated on ui_up exactly like the key path. This line was the reason B still
+        // raised the pause menu mid-race after the first fix: swrUI_HandleKeyEvent is not
+        // inert outside menus after all, so an unconditional Escape EVENT paused the game
+        // even though the scancode path was correctly withheld. The menu button still
+        // pauses from anywhere; B only speaks to menus that are actually on screen.
+        vr_menu_key(VRVK_ESCAPE, (cancel_btn && ui_up) || vr_input_menu() != 0, 5);
     }
     if (g_suppress_enter) {
         if (stdControl_aKeyInfos[DIK_RETURN_KEY] != 0)
