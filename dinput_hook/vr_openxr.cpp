@@ -73,6 +73,7 @@ static PFN_xrPollEvent p_xrPollEvent = nullptr;
 static PFN_xrResultToString p_xrResultToString = nullptr;
 static PFN_xrCreateActionSet p_xrCreateActionSet = nullptr;
 static PFN_xrCreateAction p_xrCreateAction = nullptr;
+static PFN_xrApplyHapticFeedback p_xrApplyHapticFeedback = nullptr;
 static PFN_xrStringToPath p_xrStringToPath = nullptr;
 static PFN_xrSuggestInteractionProfileBindings p_xrSuggestInteractionProfileBindings = nullptr;
 static PFN_xrAttachSessionActionSets p_xrAttachSessionActionSets = nullptr;
@@ -99,6 +100,7 @@ static XrAction g_act_rollL = XR_NULL_HANDLE;   // left grip, float
 static XrAction g_act_rollR = XR_NULL_HANDLE;   // right grip, float
 static XrAction g_act_chargeboost = XR_NULL_HANDLE;// X, bool
 static XrAction g_act_repairbtn = XR_NULL_HANDLE;  // Y, bool
+static XrAction g_act_haptic = XR_NULL_HANDLE;     // both hands, vibration output
 static bool g_actions_ready = false;
 
 // Live values, surfaced in the panel so the mapping can be eyeballed before anything is
@@ -107,6 +109,10 @@ static float g_in_steer_x = 0.0f, g_in_steer_y = 0.0f;
 static float g_in_throttle = 0.0f, g_in_brake = 0.0f;
 static bool g_in_boost = false, g_in_cancel = false, g_in_menu = false;
 static float g_in_pitch = 0.0f;
+// Right thumbstick X. Unused for driving -- steering is the left stick -- but the front-end
+// menus navigate left/right, and a player reaching for 'the stick' should not have to know
+// which one the menu listens to.
+static float g_in_pitch_x = 0.0f;
 static bool g_in_view = false, g_in_lookback = false, g_in_repair = false;
 static bool g_in_rollL = false, g_in_rollR = false;
 
@@ -197,6 +203,31 @@ struct VrState {
     // slivers alias badly at headset FOV and survive video compression poorly.
     float weather_size_mul = 1.0f;
     float weather_streak_mul = 0.5f;
+    // Touch controller vibration on impacts. Unrelated to the game's DirectInput force
+    // feedback screen, which only ever enumerated wheels and joysticks.
+    // Run flat, ignoring VR entirely. Mirrors SWE1R_NO_VR=1, which does not survive an
+    // elevated launch: Windows builds an elevated process with a fresh environment, so a
+    // variable set in the launching shell never reaches the game.
+    bool no_vr = false;
+    // Per-frame diagnostics. Mirrors SWE1R_VR_VERBOSE=1, same reasoning.
+    bool verbose = false;
+    bool haptics = true;
+    float haptic_strength = 0.7f;
+    // speedLoss -> amplitude, through a square-root curve. Calibrated across three sessions:
+    // peaks of 57, 70 and 99, so the real ceiling is around 100 -- not the 70 assumed at
+    // first, which made 0.014 saturate from 71 upward and flatten most hard hits together.
+    // At 0.010 a 100 lands at 1.0, 57 at 0.75, 25 at 0.50, 5 at 0.22. Impacts above ~100
+    // still saturate, which is intended: the hardest hit available should feel maximal.
+    float haptic_impact_scale = 0.010f;
+    // Speed drop -> amplitude, same curve. Calibrated from a real session: drops reach ~446
+    // on a hard crash, and at 0.010 everything above ~220 clamped at maximum, so a scrape and
+    // a crash felt identical. At 0.0022 a full crash lands near 1.0, a solid hit near 0.47,
+    // and a light scrape near 0.21 -- dynamics across the whole range.
+    float haptic_wall_scale = 0.0022f;
+    // Below this, a speed drop is ordinary braking or drag rather than an impact. Without a
+    // deadband the controllers hum continuously. Provisional -- the logged peak calibrates
+    // it, exactly as the pod-impact scale was calibrated.
+    float haptic_wall_deadband = 1.5f;
     // Measured, not guessed: the pod's world-space bounds span 17 game units and a podracer is
     // about 7 m, so 2.4 units/m sizes the world correctly. The earlier 3.2 was picked by eye while
     // the stereo image was still broken and made everything about a third too small.
@@ -262,6 +293,13 @@ static void vr_settings_load(void) {
     g_s.weather_size_mul = vr_ini_get_f("weather_size_mul", g_s.weather_size_mul);
     g_s.weather_streak_mul = vr_ini_get_f("weather_streak_mul", g_s.weather_streak_mul);
     g_s.render_all_selectors = vr_ini_get_b("render_all_selectors", g_s.render_all_selectors);
+    g_s.no_vr = vr_ini_get_b("no_vr", g_s.no_vr);
+    g_s.verbose = vr_ini_get_b("verbose", g_s.verbose);
+    g_s.haptics = vr_ini_get_b("haptics", g_s.haptics);
+    g_s.haptic_strength = vr_ini_get_f("haptic_strength", g_s.haptic_strength);
+    g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
+    g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
+    g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
 }
 
 void vr_settings_save(void) {
@@ -281,6 +319,13 @@ void vr_settings_save(void) {
     vr_ini_set_b("analog_steering", g_s.analog_steering);
     vr_ini_set_b("suppress_flares", g_s.suppress_flares);
     vr_ini_set_b("render_all_selectors", g_s.render_all_selectors);
+    vr_ini_set_b("no_vr", g_s.no_vr);
+    vr_ini_set_b("verbose", g_s.verbose);
+    vr_ini_set_b("haptics", g_s.haptics);
+    vr_ini_set_f("haptic_strength", g_s.haptic_strength);
+    vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
+    vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
+    vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
 }
 
 static void xr_logf(const char *fmt, ...) {
@@ -396,6 +441,7 @@ static bool create_instance(void) {
     // Input is optional: if any of these are missing we still render, just without controls.
     resolve(g_instance, "xrCreateActionSet", &p_xrCreateActionSet);
     resolve(g_instance, "xrCreateAction", &p_xrCreateAction);
+    resolve(g_instance, "xrApplyHapticFeedback", &p_xrApplyHapticFeedback);
     resolve(g_instance, "xrStringToPath", &p_xrStringToPath);
     resolve(g_instance, "xrSuggestInteractionProfileBindings",
             &p_xrSuggestInteractionProfileBindings);
@@ -628,6 +674,7 @@ static void setup_actions(void) {
     g_act_rollR = make_action(XR_ACTION_TYPE_FLOAT_INPUT, "rollright", "Roll right");
     g_act_chargeboost = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "boostcharge", "Boost");
     g_act_repairbtn = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "repairbtn", "Repair");
+    g_act_haptic = make_action(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Impact feedback");
 
     const XrActionSuggestedBinding binds[] = {
         {g_act_steer, xr_path("/user/hand/left/input/thumbstick")},
@@ -643,6 +690,11 @@ static void setup_actions(void) {
         {g_act_rollR, xr_path("/user/hand/right/input/squeeze/value")},
         {g_act_chargeboost, xr_path("/user/hand/left/input/x/click")},
         {g_act_repairbtn, xr_path("/user/hand/left/input/y/click")},
+        // Output actions are suggested in the same array as inputs. Both hands, no
+        // subaction paths: a pod impact is not a left- or right-handed event, so one
+        // xrApplyHapticFeedback call should reach every bound output.
+        {g_act_haptic, xr_path("/user/hand/left/output/haptic")},
+        {g_act_haptic, xr_path("/user/hand/right/output/haptic")},
     };
 
     XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -681,9 +733,12 @@ static void try_init(void) {
     vr_settings_load();
 
     char no_vr[8] = {0};
-    if (GetEnvironmentVariableA("SWE1R_NO_VR", no_vr, sizeof(no_vr)) > 0 && no_vr[0] == '1') {
-        xr_logf("SWE1R_NO_VR=1 -- skipping VR, running flat");
-        set_status("disabled via SWE1R_NO_VR");
+    const bool no_vr_env =
+        GetEnvironmentVariableA("SWE1R_NO_VR", no_vr, sizeof(no_vr)) > 0 && no_vr[0] == '1';
+    if (no_vr_env || g_s.no_vr) {
+        xr_logf("skipping VR, running flat (%s)",
+                no_vr_env ? "SWE1R_NO_VR=1" : "no_vr=1 in the [vr] ini block");
+        set_status("VR disabled by setting");
         g_gave_up = true;
         return;
     }
@@ -709,6 +764,10 @@ static void try_init(void) {
                 g_s.cull_fov_boost);
         xr_logf("  hud layer  : %s   analog steering: %s",
                 g_s.hud_redirect ? "on" : "off", g_s.analog_steering ? "on" : "off");
+        xr_logf("  note       : env vars do NOT reach an elevated launch; the [vr] ini\n                keys no_vr / verbose do the same job");
+        xr_logf("  haptics    : %s  strength %.2f  impact %.4f  wall %.4f",
+                g_s.haptics ? "on" : "off", g_s.haptic_strength, g_s.haptic_impact_scale,
+                g_s.haptic_wall_scale);
         xr_logf("  verbose    : set SWE1R_VR_VERBOSE=1 for per-frame diagnostics");
         xr_logf("===================");
     }
@@ -1250,6 +1309,92 @@ float vr_input_stick_y(void) {
 float vr_input_pitch(void) {
     return g_in_pitch;
 }
+float vr_input_pitch_x(void) {
+    return g_in_pitch_x;
+}
+
+// --- Haptics ---------------------------------------------------------------------------
+// The game's own Force Feedback screen enumerates DirectInput devices -- wheels and
+// joysticks with motors -- so it correctly reports nothing for a headset. Touch controller
+// vibration is an entirely separate OpenXR output path, which is this.
+//
+// Rate-limited: ResolvePodCollision runs every physics step, so an uncapped pulse would be
+// a continuous buzz for as long as two pods are in contact rather than a hit.
+static unsigned int g_haptic_next_ms = 0;      // pod impacts
+static unsigned int g_haptic_wall_next_ms = 0; // wall/terrain, independent so neither masks
+                                               // the other
+static float g_haptic_peak_loss = 0.0f;
+static float g_haptic_peak_push = 0.0f;
+
+// Vibration is perceived compressively, so a linear map either clips every heavy hit or
+// loses every light one -- the first build did the former, with all impacts pinned at max.
+static float haptic_curve(float v, float scale) {
+    const float x = v * scale;
+    return (x <= 0.0f) ? 0.0f : sqrtf(x);
+}
+
+void vr_haptic_pulse(float amplitude, float duration_ms) {
+    if (!g_s.haptics || g_act_haptic == XR_NULL_HANDLE || !p_xrApplyHapticFeedback ||
+        g_session == XR_NULL_HANDLE)
+        return;
+    amplitude *= g_s.haptic_strength;
+    if (amplitude <= 0.0f)
+        return;
+    if (amplitude > 1.0f)
+        amplitude = 1.0f;
+    if (duration_ms < 10.0f)
+        duration_ms = 10.0f;
+
+    XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+    vib.amplitude = amplitude;
+    vib.duration = (XrDuration) (duration_ms * 1000000.0f);// XrDuration is nanoseconds
+    vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+
+    XrHapticActionInfo hi{XR_TYPE_HAPTIC_ACTION_INFO};
+    hi.action = g_act_haptic;
+    p_xrApplyHapticFeedback(g_session, &hi, (const XrHapticBaseHeader *) &vib);
+}
+
+// Pod-to-pod impact. speedLoss is the engine's own measure of how much the hit cost, and its
+// scale is not documented anywhere -- so the peak seen is logged (once, on a new high water
+// mark) to calibrate haptic_impact_scale from a real session rather than by guessing.
+void vr_haptic_event(float amplitude, float duration_ms) {
+    vr_haptic_pulse(amplitude, duration_ms);
+}
+
+void vr_haptic_impact(float speed_loss) {
+    if (speed_loss <= 0.0f)
+        return;
+    if (speed_loss > g_haptic_peak_loss * 1.25f + 0.01f) {
+        g_haptic_peak_loss = speed_loss;
+        xr_logf("[haptic] peak pod impact speedLoss %.2f -> amplitude %.2f", speed_loss,
+                haptic_curve(speed_loss, g_s.haptic_impact_scale));
+    }
+    const unsigned int now = GetTickCount();
+    if (now < g_haptic_next_ms)
+        return;
+    g_haptic_next_ms = now + 90;
+    vr_haptic_pulse(haptic_curve(speed_loss, g_s.haptic_impact_scale), 60.0f);
+}
+
+// Walls, terrain and crashes, driven by a frame-to-frame speed drop. Fires more often than
+// a pod impact by nature, so it is shorter, quieter and on its own limiter. The deadband
+// matters: ordinary deceleration produces a small drop every step, and without it the
+// controllers would hum for the whole race.
+void vr_haptic_wall(float push) {
+    if (push < g_s.haptic_wall_deadband)
+        return;
+    if (push > g_haptic_peak_push * 1.25f + 0.01f) {
+        g_haptic_peak_push = push;
+        xr_logf("[haptic] peak wall/crash speed drop %.2f -> amplitude %.2f", push,
+                haptic_curve(push, g_s.haptic_wall_scale));
+    }
+    const unsigned int now = GetTickCount();
+    if (now < g_haptic_wall_next_ms)
+        return;
+    g_haptic_wall_next_ms = now + 70;
+    vr_haptic_pulse(haptic_curve(push, g_s.haptic_wall_scale), 40.0f);
+}
 int vr_input_view(void) {
     return g_in_view ? 1 : 0;
 }
@@ -1343,8 +1488,10 @@ void vr_input_poll(void) {
     if (g_act_pitch != XR_NULL_HANDLE && p_xrGetActionStateVector2f) {
         gi.action = g_act_pitch;
         XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F};
-        if (XR_SUCCEEDED(p_xrGetActionStateVector2f(g_session, &gi, &st)) && st.isActive)
+        if (XR_SUCCEEDED(p_xrGetActionStateVector2f(g_session, &gi, &st)) && st.isActive) {
             g_in_pitch = st.currentState.y;
+            g_in_pitch_x = st.currentState.x;
+        }
     }
     float rollL_v = 0.0f, rollR_v = 0.0f;
     const FloatBind fb[] = {{g_act_throttle, &g_in_throttle},
@@ -1470,6 +1617,29 @@ void vr_probe_draw_imgui(void) {
                         "0.5 deg across, for reference.");
     ImGui::SliderFloat("Snow/rain size", &g_s.weather_size_mul, 0.5f, 6.0f, "%.2fx");
     ImGui::SliderFloat("Snow/rain streak", &g_s.weather_streak_mul, 0.0f, 1.5f, "%.2fx");
+    ImGui::Separator();
+    ImGui::Checkbox("Verbose logging (per-frame diagnostics)", &g_s.verbose);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Same as SWE1R_VR_VERBOSE=1, but survives an elevated launch,\n"
+                          "which strips the environment. Takes effect next run.");
+    ImGui::Checkbox("Controller haptics on impact", &g_s.haptics);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Touch controller vibration. Nothing to do with the game's own\n"
+                          "Force Feedback screen, which only lists DirectInput wheels and\n"
+                          "joysticks and correctly reports none for a headset.");
+    ImGui::SliderFloat("Haptic strength", &g_s.haptic_strength, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Haptic impact scale", &g_s.haptic_impact_scale, 0.002f, 0.050f, "%.4f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Pod-to-pod hits. Amplitude is sqrt(speedLoss * scale), so light\n"
+                          "taps stay light and heavy hits do not all clamp at maximum.\n"
+                          "hook.log records the peak seen each session.");
+    ImGui::SliderFloat("Haptic wall scale", &g_s.haptic_wall_scale, 0.0005f, 0.020f, "%.4f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Walls, terrain and crashes, from a sudden speed drop.");
+    ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Speed drop below this is treated as braking, not an impact.\n"
+                          "Raise it if the controllers hum while simply slowing down.");
     ImGui::TextDisabled("Particles were tuned for a monitor. Streak 0 makes them\n"
                         "round flakes; 1 is the flat game's streaking.");
     if (g_s.world_flares && !g_s.suppress_flares)
