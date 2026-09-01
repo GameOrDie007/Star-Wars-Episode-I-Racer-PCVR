@@ -213,9 +213,14 @@ struct VrState {
     bool verbose = false;
     bool haptics = true;
     float haptic_strength = 0.7f;
-    // speedLoss -> amplitude. Provisional: the engine's speedLoss scale is undocumented, so
-    // this is calibrated from the peak logged during a real race.
-    float haptic_impact_scale = 8.0f;
+    // speedLoss -> amplitude, through a square-root curve. Calibrated from a real session:
+    // speedLoss runs 0..70+, not 0..1, so the first guess of 8.0 clamped every single hit at
+    // maximum. At 0.014 a heavy 70 lands near 1.0, a moderate 25 near 0.6, a light 5 near
+    // 0.26 -- which is the whole point of having a curve rather than a multiplier.
+    float haptic_impact_scale = 0.014f;
+    // wallPushback -> amplitude, same curve. Deliberately below the impact scale: scraping a
+    // wall should be felt, not punished. Its own peak is logged to calibrate this too.
+    float haptic_wall_scale = 0.010f;
     // Measured, not guessed: the pod's world-space bounds span 17 game units and a podracer is
     // about 7 m, so 2.4 units/m sizes the world correctly. The earlier 3.2 was picked by eye while
     // the stereo image was still broken and made everything about a third too small.
@@ -286,6 +291,7 @@ static void vr_settings_load(void) {
     g_s.haptics = vr_ini_get_b("haptics", g_s.haptics);
     g_s.haptic_strength = vr_ini_get_f("haptic_strength", g_s.haptic_strength);
     g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
+    g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
 }
 
 void vr_settings_save(void) {
@@ -310,6 +316,7 @@ void vr_settings_save(void) {
     vr_ini_set_b("haptics", g_s.haptics);
     vr_ini_set_f("haptic_strength", g_s.haptic_strength);
     vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
+    vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
 }
 
 static void xr_logf(const char *fmt, ...) {
@@ -749,8 +756,9 @@ static void try_init(void) {
         xr_logf("  hud layer  : %s   analog steering: %s",
                 g_s.hud_redirect ? "on" : "off", g_s.analog_steering ? "on" : "off");
         xr_logf("  note       : env vars do NOT reach an elevated launch; the [vr] ini\n                keys no_vr / verbose do the same job");
-        xr_logf("  haptics    : %s  strength %.2f  impact scale %.1f",
-                g_s.haptics ? "on" : "off", g_s.haptic_strength, g_s.haptic_impact_scale);
+        xr_logf("  haptics    : %s  strength %.2f  impact %.4f  wall %.4f",
+                g_s.haptics ? "on" : "off", g_s.haptic_strength, g_s.haptic_impact_scale,
+                g_s.haptic_wall_scale);
         xr_logf("  verbose    : set SWE1R_VR_VERBOSE=1 for per-frame diagnostics");
         xr_logf("===================");
     }
@@ -1303,8 +1311,18 @@ float vr_input_pitch_x(void) {
 //
 // Rate-limited: ResolvePodCollision runs every physics step, so an uncapped pulse would be
 // a continuous buzz for as long as two pods are in contact rather than a hit.
-static unsigned int g_haptic_next_ms = 0;
+static unsigned int g_haptic_next_ms = 0;      // pod impacts
+static unsigned int g_haptic_wall_next_ms = 0; // wall/terrain, independent so neither masks
+                                               // the other
 static float g_haptic_peak_loss = 0.0f;
+static float g_haptic_peak_push = 0.0f;
+
+// Vibration is perceived compressively, so a linear map either clips every heavy hit or
+// loses every light one -- the first build did the former, with all impacts pinned at max.
+static float haptic_curve(float v, float scale) {
+    const float x = v * scale;
+    return (x <= 0.0f) ? 0.0f : sqrtf(x);
+}
 
 void vr_haptic_pulse(float amplitude, float duration_ms) {
     if (!g_s.haptics || g_act_haptic == XR_NULL_HANDLE || !p_xrApplyHapticFeedback ||
@@ -1331,19 +1349,40 @@ void vr_haptic_pulse(float amplitude, float duration_ms) {
 // Pod-to-pod impact. speedLoss is the engine's own measure of how much the hit cost, and its
 // scale is not documented anywhere -- so the peak seen is logged (once, on a new high water
 // mark) to calibrate haptic_impact_scale from a real session rather than by guessing.
+void vr_haptic_event(float amplitude, float duration_ms) {
+    vr_haptic_pulse(amplitude, duration_ms);
+}
+
 void vr_haptic_impact(float speed_loss) {
     if (speed_loss <= 0.0f)
         return;
     if (speed_loss > g_haptic_peak_loss * 1.25f + 0.01f) {
         g_haptic_peak_loss = speed_loss;
-        xr_logf("[haptic] new peak speedLoss %.4f (scale %.1f -> amplitude %.2f)", speed_loss,
-                g_s.haptic_impact_scale, speed_loss * g_s.haptic_impact_scale);
+        xr_logf("[haptic] peak pod impact speedLoss %.2f -> amplitude %.2f", speed_loss,
+                haptic_curve(speed_loss, g_s.haptic_impact_scale));
     }
     const unsigned int now = GetTickCount();
     if (now < g_haptic_next_ms)
         return;
     g_haptic_next_ms = now + 90;
-    vr_haptic_pulse(speed_loss * g_s.haptic_impact_scale, 60.0f);
+    vr_haptic_pulse(haptic_curve(speed_loss, g_s.haptic_impact_scale), 60.0f);
+}
+
+// Wall and terrain scrape. Fires more often than a pod impact by nature, so it is shorter,
+// quieter and on its own limiter.
+void vr_haptic_wall(float push) {
+    if (push <= 0.0f)
+        return;
+    if (push > g_haptic_peak_push * 1.25f + 0.01f) {
+        g_haptic_peak_push = push;
+        xr_logf("[haptic] peak wall push %.2f -> amplitude %.2f", push,
+                haptic_curve(push, g_s.haptic_wall_scale));
+    }
+    const unsigned int now = GetTickCount();
+    if (now < g_haptic_wall_next_ms)
+        return;
+    g_haptic_wall_next_ms = now + 70;
+    vr_haptic_pulse(haptic_curve(push, g_s.haptic_wall_scale), 40.0f);
 }
 int vr_input_view(void) {
     return g_in_view ? 1 : 0;
@@ -1578,10 +1617,15 @@ void vr_probe_draw_imgui(void) {
                           "Force Feedback screen, which only lists DirectInput wheels and\n"
                           "joysticks and correctly reports none for a headset.");
     ImGui::SliderFloat("Haptic strength", &g_s.haptic_strength, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Haptic impact scale", &g_s.haptic_impact_scale, 0.5f, 40.0f, "%.1f");
+    ImGui::SliderFloat("Haptic impact scale", &g_s.haptic_impact_scale, 0.002f, 0.050f, "%.4f");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Converts the engine's speedLoss into vibration amplitude.\n"
-                          "hook.log records the peak speedLoss seen, to calibrate this.");
+        ImGui::SetTooltip("Pod-to-pod hits. Amplitude is sqrt(speedLoss * scale), so light\n"
+                          "taps stay light and heavy hits do not all clamp at maximum.\n"
+                          "hook.log records the peak seen each session.");
+    ImGui::SliderFloat("Haptic wall scale", &g_s.haptic_wall_scale, 0.002f, 0.050f, "%.4f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Scraping walls and terrain. Kept below the impact scale so a\n"
+                          "scrape is felt rather than punished.");
     ImGui::TextDisabled("Particles were tuned for a monitor. Streak 0 makes them\n"
                         "round flakes; 1 is the flat game's streaking.");
     if (g_s.world_flares && !g_s.suppress_flares)
