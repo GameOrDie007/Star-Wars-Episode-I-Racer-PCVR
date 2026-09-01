@@ -218,9 +218,11 @@ struct VrState {
     // maximum. At 0.014 a heavy 70 lands near 1.0, a moderate 25 near 0.6, a light 5 near
     // 0.26 -- which is the whole point of having a curve rather than a multiplier.
     float haptic_impact_scale = 0.014f;
-    // wallPushback -> amplitude, same curve. Deliberately below the impact scale: scraping a
-    // wall should be felt, not punished. Its own peak is logged to calibrate this too.
-    float haptic_wall_scale = 0.010f;
+    // Speed drop -> amplitude, same curve. Calibrated from a real session: drops reach ~446
+    // on a hard crash, and at 0.010 everything above ~220 clamped at maximum, so a scrape and
+    // a crash felt identical. At 0.0022 a full crash lands near 1.0, a solid hit near 0.47,
+    // and a light scrape near 0.21 -- dynamics across the whole range.
+    float haptic_wall_scale = 0.0022f;
     // Below this, a speed drop is ordinary braking or drag rather than an impact. Without a
     // deadband the controllers hum continuously. Provisional -- the logged peak calibrates
     // it, exactly as the pod-impact scale was calibrated.
@@ -1630,7 +1632,7 @@ void vr_probe_draw_imgui(void) {
         ImGui::SetTooltip("Pod-to-pod hits. Amplitude is sqrt(speedLoss * scale), so light\n"
                           "taps stay light and heavy hits do not all clamp at maximum.\n"
                           "hook.log records the peak seen each session.");
-    ImGui::SliderFloat("Haptic wall scale", &g_s.haptic_wall_scale, 0.002f, 0.050f, "%.4f");
+    ImGui::SliderFloat("Haptic wall scale", &g_s.haptic_wall_scale, 0.0005f, 0.020f, "%.4f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Walls, terrain and crashes, from a sudden speed drop.");
     ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
