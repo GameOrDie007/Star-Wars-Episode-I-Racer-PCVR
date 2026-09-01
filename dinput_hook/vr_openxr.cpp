@@ -221,6 +221,10 @@ struct VrState {
     // wallPushback -> amplitude, same curve. Deliberately below the impact scale: scraping a
     // wall should be felt, not punished. Its own peak is logged to calibrate this too.
     float haptic_wall_scale = 0.010f;
+    // Below this, a speed drop is ordinary braking or drag rather than an impact. Without a
+    // deadband the controllers hum continuously. Provisional -- the logged peak calibrates
+    // it, exactly as the pod-impact scale was calibrated.
+    float haptic_wall_deadband = 1.5f;
     // Measured, not guessed: the pod's world-space bounds span 17 game units and a podracer is
     // about 7 m, so 2.4 units/m sizes the world correctly. The earlier 3.2 was picked by eye while
     // the stereo image was still broken and made everything about a third too small.
@@ -292,6 +296,7 @@ static void vr_settings_load(void) {
     g_s.haptic_strength = vr_ini_get_f("haptic_strength", g_s.haptic_strength);
     g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
+    g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
 }
 
 void vr_settings_save(void) {
@@ -317,6 +322,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_strength", g_s.haptic_strength);
     vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
+    vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
 }
 
 static void xr_logf(const char *fmt, ...) {
@@ -1368,14 +1374,16 @@ void vr_haptic_impact(float speed_loss) {
     vr_haptic_pulse(haptic_curve(speed_loss, g_s.haptic_impact_scale), 60.0f);
 }
 
-// Wall and terrain scrape. Fires more often than a pod impact by nature, so it is shorter,
-// quieter and on its own limiter.
+// Walls, terrain and crashes, driven by a frame-to-frame speed drop. Fires more often than
+// a pod impact by nature, so it is shorter, quieter and on its own limiter. The deadband
+// matters: ordinary deceleration produces a small drop every step, and without it the
+// controllers would hum for the whole race.
 void vr_haptic_wall(float push) {
-    if (push <= 0.0f)
+    if (push < g_s.haptic_wall_deadband)
         return;
     if (push > g_haptic_peak_push * 1.25f + 0.01f) {
         g_haptic_peak_push = push;
-        xr_logf("[haptic] peak wall push %.2f -> amplitude %.2f", push,
+        xr_logf("[haptic] peak wall/crash speed drop %.2f -> amplitude %.2f", push,
                 haptic_curve(push, g_s.haptic_wall_scale));
     }
     const unsigned int now = GetTickCount();
@@ -1624,8 +1632,11 @@ void vr_probe_draw_imgui(void) {
                           "hook.log records the peak seen each session.");
     ImGui::SliderFloat("Haptic wall scale", &g_s.haptic_wall_scale, 0.002f, 0.050f, "%.4f");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Scraping walls and terrain. Kept below the impact scale so a\n"
-                          "scrape is felt rather than punished.");
+        ImGui::SetTooltip("Walls, terrain and crashes, from a sudden speed drop.");
+    ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Speed drop below this is treated as braking, not an impact.\n"
+                          "Raise it if the controllers hum while simply slowing down.");
     ImGui::TextDisabled("Particles were tuned for a monitor. Streak 0 makes them\n"
                         "round flakes; 1 is the flat game's streaking.");
     if (g_s.world_flares && !g_s.suppress_flares)

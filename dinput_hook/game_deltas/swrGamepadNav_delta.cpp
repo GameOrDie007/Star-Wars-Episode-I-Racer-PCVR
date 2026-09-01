@@ -203,19 +203,13 @@ int swrGamepadNav_GetDiagState(GamepadDiagState *out) {
 // that for the D-pad here. swrUI_ProcessMouse renders the UI tree so it runs every frame a
 // menu is up; HandleKeyEvent self-gates on UI visibility, so this is inert outside menus
 // (and harmless on the hangar bitset screens, which don't navigate by focus).
-// Timestamp of the last frame the UI tree was drawn. This function runs every frame a menu
-// is up and not while racing, which makes it the menu-vs-race discriminator the game itself
-// does not provide: the four obvious state flags (Jdge race event, InRaceSpritesEnabled,
-// currentPlayer_Test, resultsScreenActive) were each measured and all four fail to separate
-// racing from standing in the hub. Set BEFORE the gamepad-nav early-out, so the signal does
-// not silently depend on an unrelated user setting.
-extern "C" {
-unsigned int g_swrUI_activity_ms = 0;
-}
-
+// NOTE: the comment below is wrong about when this runs, and it cost two headset rounds.
+// swrUI_ProcessMouse renders the UI TREE, and the in-race HUD is part of that tree, so it
+// runs while RACING as well as in menus -- measured, twice. It is not a menu-vs-race
+// discriminator and must not be used as one. The VR input path now avoids needing one at
+// all: B is Back everywhere and Slide lives on the right thumbstick click.
 void __cdecl swrUI_ProcessMouse_delta(void) {
     hook_call_original((swrUI_ProcessMouseFn) swrUI_ProcessMouse_ADDR);
-    g_swrUI_activity_ms = GetTickCount();
     if (!imgui_state.enable_gamepad_nav)
         return;
 

@@ -131,14 +131,19 @@ void __cdecl swrRace_ResolvePodCollision_delta(swrRace* player) {
     if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
         if (player->speedLoss > 0.0f)
             vr_haptic_impact(player->speedLoss);
-        // Wall and terrain contact. wallPushback is the correction the engine applies to
-        // shove the pod off a surface, so its magnitude tracks how hard you are grinding
-        // along it. Separate scale and rate limiter from pod impacts: a scrape is
-        // sustained where a pod hit is a single event, and they must not mask each other.
-        const rdVector3 &w = player->wallPushback;
-        const float push = sqrtf(w.x * w.x + w.y * w.y + w.z * w.z);
-        if (push > 0.0f)
-            vr_haptic_wall(push);
+        // Walls, terrain and crashes, from a frame-to-frame SPEED DROP.
+        //
+        // wallPushback was tried first and never fired once in a full session -- it is
+        // still zero at this point in the physics step. A speed drop needs no knowledge of
+        // which surface was hit and covers walls, terrain and hard landings alike.
+        //
+        // Pod-to-pod hits also drop speed, so they are excluded here: speedLoss is
+        // non-zero on exactly those steps and vr_haptic_impact has already handled them.
+        static float prev_speed = 0.0f;
+        const float drop = prev_speed - player->speedValue;
+        prev_speed = player->speedValue;
+        if (player->speedLoss <= 0.0f && drop > 0.0f)
+            vr_haptic_wall(drop);
     }
 }
 

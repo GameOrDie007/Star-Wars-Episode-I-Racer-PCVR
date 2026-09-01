@@ -162,10 +162,6 @@ void vr_haptic_wall(float push);
 // A one-off pulse at a given amplitude, for discrete events such as boost engaging.
 void vr_haptic_event(float amplitude, float duration_ms);
 
-// Non-zero while the game's 2D UI tree is being drawn, i.e. a menu is up. See
-// swrUI_ProcessMouse_delta: the game has no state flag separating menus from racing, but
-// that function only runs while the UI is on screen, which is the same information.
-int vr_menu_context_active(void);
 
 // Non-zero to put the game into joystick mode and drive it from the thumbstick as a real
 // analog axis, instead of thresholding the stick into arrow-key presses. Quest controllers
