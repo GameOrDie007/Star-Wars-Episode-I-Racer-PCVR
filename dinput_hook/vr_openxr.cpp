@@ -213,11 +213,12 @@ struct VrState {
     bool verbose = false;
     bool haptics = true;
     float haptic_strength = 0.7f;
-    // speedLoss -> amplitude, through a square-root curve. Calibrated from a real session:
-    // speedLoss runs 0..70+, not 0..1, so the first guess of 8.0 clamped every single hit at
-    // maximum. At 0.014 a heavy 70 lands near 1.0, a moderate 25 near 0.6, a light 5 near
-    // 0.26 -- which is the whole point of having a curve rather than a multiplier.
-    float haptic_impact_scale = 0.014f;
+    // speedLoss -> amplitude, through a square-root curve. Calibrated across three sessions:
+    // peaks of 57, 70 and 99, so the real ceiling is around 100 -- not the 70 assumed at
+    // first, which made 0.014 saturate from 71 upward and flatten most hard hits together.
+    // At 0.010 a 100 lands at 1.0, 57 at 0.75, 25 at 0.50, 5 at 0.22. Impacts above ~100
+    // still saturate, which is intended: the hardest hit available should feel maximal.
+    float haptic_impact_scale = 0.010f;
     // Speed drop -> amplitude, same curve. Calibrated from a real session: drops reach ~446
     // on a hard crash, and at 0.010 everything above ~220 clamped at maximum, so a scrape and
     // a crash felt identical. At 0.0022 a full crash lands near 1.0, a solid hit near 0.47,
