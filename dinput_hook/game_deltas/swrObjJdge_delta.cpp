@@ -234,6 +234,7 @@ static void vr_menu_key(int vk, bool down, int slot) {
 void stdControl_ReadControls_boostfix_delta(void) {
     hook_call_original((stdControl_ReadControls_t) stdControl_ReadControls_ADDR);
 
+
     // Fold the Quest controllers in on top of the keyboard, never replacing it: the arrays
     // were just refilled by the original, so anything set here is what the game reads this
     // frame. Steering is thresholded because the game takes digital arrow keys -- the analog
@@ -292,10 +293,26 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
         vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
         vr_hold_key(VRK_PULLUP, pitch < -deadzone);
+        // A short kick when boost engages. The same button confirms menu selections, so it
+        // is keyed off the throttle rather than off any context test: you cannot be on the
+        // throttle in a menu, and that needs nothing the game refuses to tell us.
+        {
+            static bool boost_was = false;
+            const bool boost_now = vr_input_boost() != 0;
+            if (boost_now && !boost_was && vr_input_throttle() > 0.15f)
+                vr_haptic_event(0.55f, 120.0f);
+            boost_was = boost_now;
+        }
         vr_hold_key(VRK_BOOST, vr_input_boost() != 0);
-        vr_hold_key(VRK_SLIDE, vr_input_cancel() != 0);
+        // B is Back/Cancel EVERYWHERE, with no context test. During a race that means
+        // pause, which is what a Back button should do there and what console players
+        // expect. Two attempts at splitting B by context both failed -- see the note on
+        // swrUI_ProcessMouse in swrGamepadNav_delta -- so Slide was moved instead.
+        const bool cancel_btn = vr_input_cancel() != 0;
+        // Slide is right thumbstick click, which used to be Look Back. Look Back is
+        // redundant in a headset: turn your head.
+        vr_hold_key(VRK_SLIDE, vr_input_lookback() != 0);
         vr_hold_key(VRK_VIEW, vr_input_view() != 0);
-        vr_hold_key(VRK_LOOKBACK, vr_input_lookback() != 0);
         // Repair is right-stick-down. It shares that direction with pull-up, which is fine:
         // holding repair while climbing is a legitimate thing to want mid-race.
         vr_hold_key(VRK_REPAIR, vr_input_repair() != 0);
@@ -304,15 +321,24 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // Menu confirm/cancel ride the same buttons; the front end uses the event path below,
         // and these scancodes mean nothing to it, so the two cannot collide.
         vr_hold_key(VRK_ENTER, vr_input_boost() != 0);
-        vr_hold_key(VRK_ESC, vr_input_menu() != 0);
+        // Escape from either button, unconditionally.
+        vr_hold_key(VRK_ESC, vr_input_menu() != 0 || cancel_btn);
 
         // Same intent again, as events, for the front-end menus.
-        vr_menu_key(VRVK_UP, stick_y > deadzone, 0);
-        vr_menu_key(VRVK_DOWN, stick_y < -deadzone, 1);
-        vr_menu_key(VRVK_LEFT, steer < -deadzone, 2);
-        vr_menu_key(VRVK_RIGHT, steer > deadzone, 3);
+        //
+        // Both sticks navigate, matching the key path above. This previously read the LEFT
+        // stick only while the key path already took whichever stick was pushed further --
+        // the same fix applied to one path and not the other. Pushing the right stick in a
+        // front-end menu did nothing at all, which is exactly what a user reported as
+        // 'trouble moving the selection to where I wanted'.
+        const float menu_x = (fabsf(steer) > fabsf(vr_input_pitch_x())) ? steer
+                                                                       : vr_input_pitch_x();
+        vr_menu_key(VRVK_UP, pitch > deadzone, 0);
+        vr_menu_key(VRVK_DOWN, pitch < -deadzone, 1);
+        vr_menu_key(VRVK_LEFT, menu_x < -deadzone, 2);
+        vr_menu_key(VRVK_RIGHT, menu_x > deadzone, 3);
         vr_menu_key(VRVK_RETURN, vr_input_boost() != 0, 4);
-        vr_menu_key(VRVK_ESCAPE, vr_input_cancel() != 0 || vr_input_menu() != 0, 5);
+        vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0, 5);
     }
     if (g_suppress_enter) {
         if (stdControl_aKeyInfos[DIK_RETURN_KEY] != 0)

@@ -77,15 +77,23 @@ weight from the parked OpenVR backend and can be deleted.
 | Left trigger | Brake |
 | Left / right grip | Roll left / right |
 | Left stick click | Switch camera |
-| Right stick click | Look back |
+| Right stick click | Slide |
 | X | Boost |
 | Y | Repair |
 | A | Confirm (menus) |
-| B | Slide |
-| Left menu | Pause |
+| B | **Back** / pause |
+| Left menu | Pause / **Back** |
 | **Both grips together** | **Recentre the 2D panel** |
 
-Either thumbstick navigates menus. Keyboard continues to work alongside the controllers.
+**Either thumbstick navigates menus**, in both directions. Keyboard continues to work
+alongside the controllers.
+
+**There are two Back buttons**, and they work the same everywhere: B and the left menu
+button both back out of menus, and both pause a race. No mode switching, nothing to learn.
+
+**Slide is on the right thumbstick click**, where Look Back used to be. Look Back is
+genuinely redundant in a headset - turn your head - and freeing that button is what let B
+become an unambiguous Back.
 
 ## Settings
 
@@ -111,6 +119,14 @@ Worth tuning:
   at arm's length and reads small on a panel a metre and a half away.
 - **Engine cull FOV boost** - widens the engine's culling frustum so scenery does not vanish when
   you turn your head. Costs performance; lower it if you need frames.
+- **Controller haptics on impact** - on by default. The Touch controllers buzz when your
+  pod is hit, scaled by how hard. *Haptic strength* sets the overall level and *Haptic
+  impact scale* how sharply a hit translates into vibration.
+
+  This is unrelated to the game's own **Force Feedback** settings screen, which reports
+  *NO FORCE FEEDBACK DEVICE DETECTED*. That screen enumerates DirectInput devices -
+  steering wheels and joysticks with motors - and a headset is not one, so it says the same
+  thing on an unmodded install. Nothing is wrong with your setup.
 - **Suppress the game's screen-space flares** - on by default; drops the originals, which
   cannot anchor to the world in VR.
 - **Draw flares in world space (VR)** - on by default. Redraws them as billboards that sit on
@@ -157,8 +173,20 @@ runtime, GPU, resolutions and every VR setting - which answers most questions on
 **Grab it before relaunching**, since it is overwritten. If the game crashed, include the timestamped
 report from `crashes/` too; those carry a symbolised stack.
 
-For anything obscure, set `SWE1R_VR_VERBOSE=1` before launching to enable per-frame diagnostics
-(eye-pass divergence, framebuffer status, input state, composite tracing).
+For anything obscure, turn on **Verbose logging** in the F5 panel (or set
+`SWE1R_VR_VERBOSE=1`) to enable per-frame diagnostics - eye-pass divergence, framebuffer
+status, input state, composite tracing.
+
+**Environment variables may not reach the game.** This release of the game usually launches
+*elevated*, and Windows builds an elevated process with a fresh environment, so a variable
+you set in a shell or a shortcut is silently discarded. Both switches therefore also exist
+as keys in the `[vr]` block of `SW_RACER_RE.ini`, which elevation cannot strip:
+
+    [vr]
+    no_vr=1      ; run flat, skip VR entirely
+    verbose=1    ; per-frame diagnostics
+
+Prefer the ini keys. The environment variables still work when they actually arrive.
 
 ## Troubleshooting
 
@@ -166,7 +194,8 @@ For anything obscure, set `SWE1R_VR_VERBOSE=1` before launching to enable per-fr
 means no headset was streaming when it launched - start Virtual Desktop first. No runtime at all
 means you have no 32-bit OpenXR (see *Requirements*).
 
-**Need to launch without VR:** set `SWE1R_NO_VR=1` in the environment.
+**Need to launch without VR:** set `no_vr=1` in the `[vr]` block of `SW_RACER_RE.ini`, or
+`SWE1R_NO_VR=1` in the environment if it reaches the game (see above).
 
 **Quit through the game's own menu.** Killing the process with a VR runtime loaded can leave it
 unkillable until a reboot - that is a runtime-level behaviour, not specific to this mod.

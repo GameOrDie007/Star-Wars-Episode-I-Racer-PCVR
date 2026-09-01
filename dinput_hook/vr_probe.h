@@ -143,11 +143,25 @@ int vr_input_cancel(void);
 int vr_input_menu(void);
 float vr_input_stick_y(void);
 float vr_input_pitch(void);   // right stick Y: nose up / down
+float vr_input_pitch_x(void); // right stick X: menu left/right only
 int vr_input_view(void);      // left stick click: switch camera
-int vr_input_lookback(void);  // left grip
-int vr_input_repair(void);    // right grip
-int vr_input_roll_left(void); // X
-int vr_input_roll_right(void);// Y
+int vr_input_lookback(void);  // right stick click: look back
+int vr_input_repair(void);    // Y: repair
+int vr_input_roll_left(void); // left grip
+int vr_input_roll_right(void);// right grip
+
+// Touch controller vibration. Separate from the game's DirectInput force feedback, which
+// enumerates wheels and joysticks and correctly finds none for a headset.
+// amplitude 0..1 (scaled by the user's strength setting), duration in milliseconds.
+void vr_haptic_pulse(float amplitude, float duration_ms);
+// Pod-to-pod impact, driven by the engine's own speedLoss. Rate-limited internally --
+// ResolvePodCollision runs every physics step, so an uncapped pulse is a buzz, not a hit.
+void vr_haptic_impact(float speed_loss);
+// Wall / terrain scrape, from swrRace.wallPushback. Own scale and rate limiter.
+void vr_haptic_wall(float push);
+// A one-off pulse at a given amplitude, for discrete events such as boost engaging.
+void vr_haptic_event(float amplitude, float duration_ms);
+
 
 // Non-zero to put the game into joystick mode and drive it from the thumbstick as a real
 // analog axis, instead of thresholding the stick into arrow-key presses. Quest controllers
