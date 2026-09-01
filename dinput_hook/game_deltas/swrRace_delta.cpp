@@ -18,6 +18,7 @@ extern FILE* hook_log;
 
 #include "../hook_helper.h"
 #include "../imgui_utils.h"// imgui_state: mp_disable_collision + "Game" panel cutscene toggles
+#include "../vr_probe.h"   // vr_haptic_impact (Touch controller vibration on pod impacts)
 #include "swrModel_delta.h"// swrModel_LoadFromId_delta (loads dust models through the GL path)
 
 // The pod's cockpit->engine cables (partNodes[10] and [11]) are bent into a curve each
@@ -122,6 +123,14 @@ void __cdecl swrRace_ResolvePodCollision_delta(swrRace* player) {
         return;
     }
     hook_call_original((swrRace_ResolvePodCollision_t) swrRace_ResolvePodCollision_ADDR, player);
+
+    // Buzz the controllers on a pod-to-pod hit. LOCAL only: the original resolves collisions
+    // for every pod on this machine, so without the flag test all eleven other racers would
+    // vibrate the player's hands. speedLoss is the engine's own measure of the hit and is
+    // zero when nothing was struck. vr_haptic_impact rate-limits and no-ops without VR.
+    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0 &&
+        player->speedLoss > 0.0f)
+        vr_haptic_impact(player->speedLoss);
 }
 
 // --- Ground dust/splash effect: fix the AI-full-LOD contention -------------------------------------
