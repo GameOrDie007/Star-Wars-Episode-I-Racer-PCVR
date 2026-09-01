@@ -77,21 +77,23 @@ weight from the parked OpenVR backend and can be deleted.
 | Left trigger | Brake |
 | Left / right grip | Roll left / right |
 | Left stick click | Switch camera |
-| Right stick click | Look back |
+| Right stick click | Slide |
 | X | Boost |
 | Y | Repair |
 | A | Confirm (menus) |
-| B | Slide while racing / **Back** in menus |
+| B | **Back** / pause |
 | Left menu | Pause / **Back** |
 | **Both grips together** | **Recentre the 2D panel** |
 
 **Either thumbstick navigates menus**, in both directions. Keyboard continues to work
 alongside the controllers.
 
-**There are two Back buttons.** B backs out of menus and the pause screen; the left menu
-button does the same and also pauses a race. B keeps its Slide job while you are actually
-driving, so it does not pause the game mid-race - the mod switches its meaning based on
-whether a menu is on screen.
+**There are two Back buttons**, and they work the same everywhere: B and the left menu
+button both back out of menus, and both pause a race. No mode switching, nothing to learn.
+
+**Slide is on the right thumbstick click**, where Look Back used to be. Look Back is
+genuinely redundant in a headset - turn your head - and freeing that button is what let B
+become an unambiguous Back.
 
 ## Settings
 
