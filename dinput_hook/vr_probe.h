@@ -145,7 +145,8 @@ float vr_input_stick_y(void);
 float vr_input_pitch(void);   // right stick Y: nose up / down
 float vr_input_pitch_x(void); // right stick X: menu left/right only
 int vr_input_view(void);      // left stick click: switch camera
-int vr_input_lookback(void);  // right stick click: look back
+int vr_input_lookback(void);  // X: look back
+int vr_input_slide(void);     // right stick click: slide
 int vr_input_repair(void);    // Y: repair
 int vr_input_roll_left(void); // left grip
 int vr_input_roll_right(void);// right grip

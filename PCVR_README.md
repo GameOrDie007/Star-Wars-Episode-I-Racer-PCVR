@@ -78,9 +78,9 @@ weight from the parked OpenVR backend and can be deleted.
 | Left / right grip | Roll left / right |
 | Left stick click | Switch camera |
 | Right stick click | Slide |
-| X | Boost |
+| X | **Look back** |
 | Y | Repair |
-| A | Confirm (menus) |
+| A | Boost, and confirm in menus |
 | B | **Back** / pause |
 | Left menu | Pause / **Back** |
 | **Both grips together** | **Recentre the 2D panel** |
@@ -91,9 +91,15 @@ alongside the controllers.
 **There are two Back buttons**, and they work the same everywhere: B and the left menu
 button both back out of menus, and both pause a race. No mode switching, nothing to learn.
 
-**Slide is on the right thumbstick click**, where Look Back used to be. Look Back is
-genuinely redundant in a headset - turn your head - and freeing that button is what let B
-become an unambiguous Back.
+**Slide is on the right thumbstick click**, and **Look back is on X**. Freeing B is what
+let it become an unambiguous Back.
+
+X was available because it never did anything: two controller actions had been given the
+same display name, OpenXR rejected the second, and the button had been silently dead since
+the first release. It is a real button again.
+
+**Boost is A.** Hold the left stick forward to charge, tap A to fire it, and it sustains
+itself as long as you hold the throttle - you do not need to keep A held.
 
 ## Settings
 
