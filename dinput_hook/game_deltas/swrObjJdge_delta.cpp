@@ -309,9 +309,11 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // expect. Two attempts at splitting B by context both failed -- see the note on
         // swrUI_ProcessMouse in swrGamepadNav_delta -- so Slide was moved instead.
         const bool cancel_btn = vr_input_cancel() != 0;
-        // Slide is right thumbstick click, which used to be Look Back. Look Back is
-        // redundant in a headset: turn your head.
-        vr_hold_key(VRK_SLIDE, vr_input_lookback() != 0);
+        // Slide on the right thumbstick click, Look Back on X. Look Back is NOT redundant
+        // in a headset, which was the assumption when it was dropped: seated in an ordinary
+        // chair you cannot turn far enough to see behind you.
+        vr_hold_key(VRK_SLIDE, vr_input_slide() != 0);
+        vr_hold_key(VRK_LOOKBACK, vr_input_lookback() != 0);
         vr_hold_key(VRK_VIEW, vr_input_view() != 0);
         // Repair is right-stick-down. It shares that direction with pull-up, which is fine:
         // holding repair while climbing is a legitimate thing to want mid-race.

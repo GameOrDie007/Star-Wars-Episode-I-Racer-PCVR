@@ -98,7 +98,7 @@ static XrAction g_act_view = XR_NULL_HANDLE;    // left stick click, bool
 static XrAction g_act_lookback = XR_NULL_HANDLE;// right stick click, bool
 static XrAction g_act_rollL = XR_NULL_HANDLE;   // left grip, float
 static XrAction g_act_rollR = XR_NULL_HANDLE;   // right grip, float
-static XrAction g_act_chargeboost = XR_NULL_HANDLE;// X, bool
+static XrAction g_act_slide = XR_NULL_HANDLE;      // right thumbstick click, bool
 static XrAction g_act_repairbtn = XR_NULL_HANDLE;  // Y, bool
 static XrAction g_act_haptic = XR_NULL_HANDLE;     // both hands, vibration output
 static bool g_actions_ready = false;
@@ -114,6 +114,7 @@ static float g_in_pitch = 0.0f;
 // which one the menu listens to.
 static float g_in_pitch_x = 0.0f;
 static bool g_in_view = false, g_in_lookback = false, g_in_repair = false;
+static bool g_in_slide = false;
 static bool g_in_rollL = false, g_in_rollR = false;
 
 static XrInstance g_instance = XR_NULL_HANDLE;
@@ -642,8 +643,20 @@ static XrAction make_action(XrActionType type, const char *name, const char *lab
     snprintf(ai.actionName, sizeof(ai.actionName), "%s", name);
     snprintf(ai.localizedActionName, sizeof(ai.localizedActionName), "%s", label);
     XrAction a = XR_NULL_HANDLE;
-    if (p_xrCreateAction && XR_FAILED(p_xrCreateAction(g_action_set, &ai, &a)))
-        return XR_NULL_HANDLE;
+    if (p_xrCreateAction) {
+        const XrResult r = p_xrCreateAction(g_action_set, &ai, &a);
+        if (XR_FAILED(r)) {
+            // This returning quietly cost a real bug. localizedActionName must be UNIQUE
+            // within an action set; two actions here were both called "Boost", so the
+            // second was rejected with XR_ERROR_LOCALIZED_NAME_DUPLICATED and the X button
+            // did nothing for the entire life of the mod -- while the code read as though
+            // it worked, because the poll loop simply skips null handles. A control that
+            // fails to exist has to say so.
+            xr_logf("xrCreateAction(%s / '%s') FAILED: %s -- that control will do nothing",
+                    name, label, xr_str(r));
+            return XR_NULL_HANDLE;
+        }
+    }
     return a;
 }
 
@@ -672,7 +685,7 @@ static void setup_actions(void) {
     g_act_lookback = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "lookback", "Look back");
     g_act_rollL = make_action(XR_ACTION_TYPE_FLOAT_INPUT, "rollleft", "Roll left");
     g_act_rollR = make_action(XR_ACTION_TYPE_FLOAT_INPUT, "rollright", "Roll right");
-    g_act_chargeboost = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "boostcharge", "Boost");
+    g_act_slide = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "slide", "Slide");
     g_act_repairbtn = make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, "repairbtn", "Repair");
     g_act_haptic = make_action(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Impact feedback");
 
@@ -685,10 +698,12 @@ static void setup_actions(void) {
         {g_act_menu, xr_path("/user/hand/left/input/menu/click")},
         {g_act_pitch, xr_path("/user/hand/right/input/thumbstick")},
         {g_act_view, xr_path("/user/hand/left/input/thumbstick/click")},
-        {g_act_lookback, xr_path("/user/hand/right/input/thumbstick/click")},
+        // Look Back is on X, which is reachable without letting go of anything. It was
+        // free because its old action never got created (duplicate localized name).
+        {g_act_lookback, xr_path("/user/hand/left/input/x/click")},
         {g_act_rollL, xr_path("/user/hand/left/input/squeeze/value")},
         {g_act_rollR, xr_path("/user/hand/right/input/squeeze/value")},
-        {g_act_chargeboost, xr_path("/user/hand/left/input/x/click")},
+        {g_act_slide, xr_path("/user/hand/right/input/thumbstick/click")},
         {g_act_repairbtn, xr_path("/user/hand/left/input/y/click")},
         // Output actions are suggested in the same array as inputs. Both hands, no
         // subaction paths: a pod impact is not a left- or right-handed event, so one
@@ -1401,6 +1416,9 @@ int vr_input_view(void) {
 int vr_input_lookback(void) {
     return g_in_lookback ? 1 : 0;
 }
+int vr_input_slide(void) {
+    return g_in_slide ? 1 : 0;
+}
 int vr_input_repair(void) {
     return g_in_repair ? 1 : 0;
 }
@@ -1510,10 +1528,10 @@ void vr_input_poll(void) {
         XrAction act;
         bool *out;
     };
-    static bool xbtn = false, ybtn = false;
+    static bool ybtn = false;
     const BoolBind bb[] = {{g_act_boost, &g_in_boost},       {g_act_cancel, &g_in_cancel},
                            {g_act_menu, &g_in_menu},         {g_act_view, &g_in_view},
-                           {g_act_lookback, &g_in_lookback}, {g_act_chargeboost, &xbtn},
+                           {g_act_lookback, &g_in_lookback}, {g_act_slide, &g_in_slide},
                            {g_act_repairbtn, &ybtn}};
     for (const BoolBind &b: bb) {
         if (b.act == XR_NULL_HANDLE || !p_xrGetActionStateBoolean)
@@ -1531,8 +1549,9 @@ void vr_poll_recenter_chord(void);
     // Both grips at once: recentre the panel. Checked here, once per frame, right after the grip
     // states are refreshed.
     vr_poll_recenter_chord();
-    // Right stick is pitch ONLY now -- nothing else shares it. X boosts, Y repairs.
-    g_in_boost = g_in_boost || xbtn;
+    // Boost is A alone. The old X-as-boost alias never worked (its action failed to
+    // create), and it is not needed: the charge is held on the left stick and A only has
+    // to be tapped, after which the throttle sustains it. X is Look Back now.
     g_in_repair = ybtn;
 
     // Log only while something is actually being pressed, so one short session shows whether
