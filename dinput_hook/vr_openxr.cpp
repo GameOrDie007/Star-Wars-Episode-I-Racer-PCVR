@@ -187,7 +187,11 @@ struct VrState {
     float overlay_scale = 1.8f;
     float cull_fov_boost = 2.0f;
     bool render_all_selectors = false;
-    bool analog_steering = false;
+    // On by default from v1.2. It writes swrRace_SteeringInput directly, which is the
+    // route the game's own analog controllers use; the previous implementation wrote a raw
+    // DirectInput axis array several stages upstream and never reached the pod, which is
+    // why the toggle appeared to do nothing.
+    bool analog_steering = true;
     bool suppress_flares = true;// screen-space flares cannot anchor to the world in VR
     // With the screen-space ones dropped, redraw the light streaks as real geometry in the world
     // so they sit on their lamp posts. Half-size in metres; a streetlight glow is about a metre.

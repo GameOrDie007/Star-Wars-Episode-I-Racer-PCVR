@@ -19,6 +19,9 @@ extern "C" {
 #include <globals.h>
 
 extern FILE* hook_log;
+// Captured in swrRace_delta.cpp from the collision hook, which already runs per physics
+// step and already receives the local pod.
+extern swrRace* g_vr_local_player;
 }
 
 #include "../hook_helper.h"
@@ -242,22 +245,35 @@ void stdControl_ReadControls_boostfix_delta(void) {
     if (vr_input_available()) {
         const float steer = vr_input_steer();
         const float stick_y = vr_input_stick_y();
+        // Whichever stick is pushed further, same rule the key path uses below. Needed up
+        // here because the analog write happens before that is computed.
+        const float pitch_analog =
+            (fabsf(stick_y) > fabsf(vr_input_pitch())) ? stick_y : vr_input_pitch();
+        // Threshold for the DIGITAL fallback only. Analog steering ignores it entirely --
+        // a threshold is exactly the "dead zone then full tilt" players reported.
         const float deadzone = 0.35f;
 
-        // Analog path: tell the game a joystick exists so it reads axes at all (it never
-        // calls stdControl_ReadAxis in keyboard mode -- proved by the axis probe logging
-        // nothing), then write the stick straight into the axis array the game samples.
-        // aAxisPos is int[15]; the game's own scale is what ApplyAxisConfig set up, so the
-        // magnitude here is a first guess and the axis index is still to be confirmed from
-        // the [CTRL] log once the game starts querying them.
+        // Analog path. swrRace_UpdatePlayerControl reads these float globals directly when
+        // the profile's control type selects the analog branch -- the same route an Xbox
+        // pad takes, which is why an Xbox pad feels smooth and injected arrow keys do not.
+        //
+        // The previous attempt wrote stdControl_aAxisPos, which is raw DirectInput counts
+        // several stages upstream of this and needs a working joystick binding to ever
+        // reach the pod. That is why the toggle appeared to do nothing.
         const bool analog = vr_analog_steering_enabled() != 0;
         if (analog) {
-            joystick_detected = 1;
-            swrConfig_joystick_enabled = 1;
-            if (swrConfig_joystickNbAxis < 2)
-                swrConfig_joystickNbAxis = 2;
-            stdControl_aAxisPos[0] = (int) (steer * 1000.0f);
-            stdControl_aAxisPos[1] = (int) (-stick_y * 1000.0f);
+            float s = steer;
+            if (s > 1.0f)
+                s = 1.0f;
+            else if (s < -1.0f)
+                s = -1.0f;
+            float p = pitch_analog;
+            if (p > 1.0f)
+                p = 1.0f;
+            else if (p < -1.0f)
+                p = -1.0f;
+            swrRace_SteeringInput = s;
+            swrRace_PitchInput = p;
         }
 
         // Up/Down arrows do double duty: pitch during a race, menu navigation everywhere
@@ -341,6 +357,26 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_menu_key(VRVK_RIGHT, menu_x > deadzone, 3);
         vr_menu_key(VRVK_RETURN, vr_input_boost() != 0, 4);
         vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0, 5);
+
+        // The control-type byte decides whether the analog globals above are read at all,
+        // and it cannot be determined from the source. Logged once, and again if it ever
+        // changes, so a single session settles whether it needs forcing.
+        if (g_vr_local_player != nullptr && g_vr_local_player->score_ptr != nullptr &&
+            g_vr_local_player->score_ptr->localPlayerProfile != nullptr) {
+            const int ct =
+                *((int8_t*) g_vr_local_player->score_ptr->localPlayerProfile + 0x23);
+            static int last_ct = -999;
+            if (ct != last_ct) {
+                last_ct = ct;
+                fprintf(hook_log,
+                        "[analog] controlType=%d (%s)  analog_toggle=%d  steerGlobal=%.3f\n",
+                        ct,
+                        (ct == 0 || ct == 9) ? "ANALOG branch - globals are read"
+                                             : "DIGITAL branch - globals IGNORED",
+                        (int) analog, swrRace_SteeringInput);
+                fflush(hook_log);
+            }
+        }
     }
     if (g_suppress_enter) {
         if (stdControl_aKeyInfos[DIK_RETURN_KEY] != 0)
