@@ -1399,6 +1399,18 @@ void swrRace_SendFlameAttackEvent(int player, double param_2, void* param_3, voi
 // flame-attack, then commits turnRateTarget / throttle / tilt / flags0 / flags1. Reverse-hooked
 // (dormant). Preserves an original bug: the analog pitch LOW clamp also writes +0.8 (see below).
 // 0x0046bec0
+// VR analog steering override.
+//
+// Written each frame by the VR input layer, read below at the exact point the value is
+// consumed. It has to be applied HERE and not by setting swrRace_SteeringInput earlier:
+// the game derives that global from the arrow keys during its own input pass, at full
+// deflection, and that pass runs after the mod's controls hook. Writing it earlier is
+// writing to a variable that is about to be assigned -- and full deflection from a key is
+// exactly the "dead zone then full lock" feel players reported.
+float g_vr_analog_steer = 0.0f;
+float g_vr_analog_pitch = 0.0f;
+int g_vr_analog_active = 0;
+
 void swrRace_UpdatePlayerControl(swrRace* player)
 {
     float steerInput = 0.0f;
@@ -1439,6 +1451,20 @@ void swrRace_UpdatePlayerControl(swrRace* player)
             bankLeft = (int) swrControl_rollLeftButton;
             bankRight = (int) swrControl_rollRightButton;
         }
+        // Applied after the mirror branch so the invert-steering option still applies.
+        if (g_vr_analog_active) {
+            steerInput = mirror ? -g_vr_analog_steer : g_vr_analog_steer;
+            {
+                static int vr_logged = 0;
+                if (!vr_logged) {
+                    vr_logged = 1;
+                    fprintf(hook_log,
+                            "[analog] override LIVE in UpdatePlayerControl: steer=%.3f mirror=%d\n",
+                            steerInput, mirror != 0);
+                    fflush(hook_log);
+                }
+            }
+        }
         thrustDigital = (int) swrRace_ThrustInput;
         brakeDigital = (int) swrControl_brakeButton;
         viewButtonInput = (int) swrControl_viewButton;
@@ -1457,8 +1483,12 @@ void swrRace_UpdatePlayerControl(swrRace* player)
             brakeDigital = 0;
         }
 
-        pitchForward = swrRace_PitchInput * SWR_CTL_STEER_SCALE;
-        if (SWR_CTL_STEER_SCALE < swrRace_PitchInput * SWR_CTL_STEER_SCALE) {
+        // Same substitution for pitch. Input is clamped to [-1,1] by the writer, so
+        // pitchForward stays within +/-SWR_CTL_STEER_SCALE and never trips the retail low
+        // clamp below, which would flip the sign.
+        float pitchSrc = g_vr_analog_active ? g_vr_analog_pitch : swrRace_PitchInput;
+        pitchForward = pitchSrc * SWR_CTL_STEER_SCALE;
+        if (SWR_CTL_STEER_SCALE < pitchSrc * SWR_CTL_STEER_SCALE) {
             pitchForward = SWR_CTL_STEER_SCALE;
         }
         // BUG (preserved from retail): the low clamp writes +0.8, not -0.8.
