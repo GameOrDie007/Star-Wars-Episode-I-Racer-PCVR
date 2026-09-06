@@ -1452,7 +1452,12 @@ void swrRace_UpdatePlayerControl(swrRace* player)
             bankRight = (int) swrControl_rollRightButton;
         }
         // Applied after the mirror branch so the invert-steering option still applies.
-        if (g_vr_analog_active) {
+        //
+        // Only while the stick is actually deflected. At rest the game's own value passes
+        // through untouched, which is what lets a wheel or pad still steer for someone who
+        // is in VR but driving with something else -- an unconditional override would pin
+        // their steering to a centred thumbstick.
+        if (g_vr_analog_active && (g_vr_analog_steer > 0.02f || g_vr_analog_steer < -0.02f)) {
             steerInput = mirror ? -g_vr_analog_steer : g_vr_analog_steer;
             {
                 static int vr_logged = 0;
@@ -1486,7 +1491,10 @@ void swrRace_UpdatePlayerControl(swrRace* player)
         // Same substitution for pitch. Input is clamped to [-1,1] by the writer, so
         // pitchForward stays within +/-SWR_CTL_STEER_SCALE and never trips the retail low
         // clamp below, which would flip the sign.
-        float pitchSrc = g_vr_analog_active ? g_vr_analog_pitch : swrRace_PitchInput;
+        float pitchSrc =
+            (g_vr_analog_active && (g_vr_analog_pitch > 0.02f || g_vr_analog_pitch < -0.02f))
+                ? g_vr_analog_pitch
+                : swrRace_PitchInput;
         pitchForward = pitchSrc * SWR_CTL_STEER_SCALE;
         if (SWR_CTL_STEER_SCALE < pitchSrc * SWR_CTL_STEER_SCALE) {
             pitchForward = SWR_CTL_STEER_SCALE;
