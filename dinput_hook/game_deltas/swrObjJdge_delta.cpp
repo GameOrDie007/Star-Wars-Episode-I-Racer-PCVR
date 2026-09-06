@@ -307,8 +307,10 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_LEFT, !analog && steer < -deadzone);
         vr_hold_key(VRK_RIGHT, !analog && steer > deadzone);
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
-        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
-        vr_hold_key(VRK_PULLUP, pitch < -deadzone);
+        // Gated on !analog exactly like steering. Without this the analog global and the
+        // digital keys both drive pitch at once and fight each other.
+        vr_hold_key(VRK_NOSEDOWN, !analog && pitch > deadzone);
+        vr_hold_key(VRK_PULLUP, !analog && pitch < -deadzone);
         // A short kick when boost engages. The same button confirms menu selections, so it
         // is keyed off the throttle rather than off any context test: you cannot be on the
         // throttle in a menu, and that needs nothing the game refuses to tell us.
