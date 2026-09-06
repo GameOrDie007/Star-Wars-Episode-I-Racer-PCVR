@@ -115,7 +115,15 @@ void __cdecl swrRace_AnimateDisplayPod_delta(swrModel_Node** nodes, void* transf
 // back through its address via this typedef.
 typedef void(__cdecl* swrRace_ResolvePodCollision_t)(swrRace* player);
 
+// The local player's swrRace, captured from a hook that already runs every physics step
+// and already receives it. Used to reach localPlayerProfile for the control-type byte.
+// Deliberately not a new detour: two detours on one address clobber each other.
+swrRace* g_vr_local_player = nullptr;
+
 void __cdecl swrRace_ResolvePodCollision_delta(swrRace* player) {
+    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0)
+        g_vr_local_player = player;
+
     if (imgui_state.mp_disable_collision && multiplayer_enabled != 0 && player != nullptr) {
         // Mirror the original's "no pod nearby" outcome: it always clears speedLoss before the
         // collision test, so do the same here instead of leaving a stale value from a prior hit.
