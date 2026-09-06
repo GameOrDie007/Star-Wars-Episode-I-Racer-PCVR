@@ -290,7 +290,11 @@ static void vr_settings_load(void) {
     g_s.cull_fov_boost = vr_ini_get_f("cull_fov_boost", g_s.cull_fov_boost);
     g_s.menu_shift = vr_ini_get_f("menu_shift", g_s.menu_shift);
     g_s.hud_redirect = vr_ini_get_b("hud_redirect", g_s.hud_redirect);
-    g_s.analog_steering = vr_ini_get_b("analog_steering", g_s.analog_steering);
+    // NOTE the key name. Everyone who ran v1.0/v1.1 has "analog_steering=0" persisted from
+    // when the setting was a broken experiment, and a stale persisted value silently beats a
+    // new compiled default -- so changing the default alone would reach nobody. The key is
+    // versioned instead; the old one is left inert in their ini.
+    g_s.analog_steering = vr_ini_get_b("analog_steering2", g_s.analog_steering);
     g_s.suppress_flares = vr_ini_get_b("suppress_flares", g_s.suppress_flares);
     g_s.world_flares = vr_ini_get_b("world_flares", g_s.world_flares);
     g_s.flare_size_m = vr_ini_get_f("flare_size_m", g_s.flare_size_m);
@@ -321,7 +325,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("weather_size_mul", g_s.weather_size_mul);
     vr_ini_set_f("weather_streak_mul", g_s.weather_streak_mul);
     vr_ini_set_b("hud_redirect", g_s.hud_redirect);
-    vr_ini_set_b("analog_steering", g_s.analog_steering);
+    vr_ini_set_b("analog_steering2", g_s.analog_steering);
     vr_ini_set_b("suppress_flares", g_s.suppress_flares);
     vr_ini_set_b("render_all_selectors", g_s.render_all_selectors);
     vr_ini_set_b("no_vr", g_s.no_vr);
