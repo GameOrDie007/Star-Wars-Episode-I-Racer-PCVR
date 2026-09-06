@@ -304,6 +304,18 @@ typedef void(__cdecl* swrRace_UpdatePlayerControl_t)(swrRace* player);
 static const uint32_t BOOST_INDICATOR_CHARGING = 1;   // boostIndicatorStatus: 0 not ready, 1 charging, 2 ready
 static const float BOOST_CHARGE_SKIP_SECONDS = 2.0f;  // > the ~1s stock charge hold, so it reads ready at once
 
+// VR analog steering override.
+//
+// Written each frame by the VR input layer, applied immediately below. The value has to
+// be set HERE and nowhere earlier: the game derives swrRace_SteeringInput from the arrow
+// keys during its own input pass, at FULL deflection, and that pass runs before control.
+// Full deflection from a key is exactly the "dead zone, then full lock" players reported.
+extern "C" {
+float g_vr_analog_steer = 0.0f;
+float g_vr_analog_pitch = 0.0f;
+int g_vr_analog_active = 0;
+}
+
 void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
     if (player != nullptr && imgui_state.cheats_enabled &&
         (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
@@ -313,6 +325,31 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
         if (imgui_state.cheat_no_boost_charge &&
             player->boostIndicatorStatus == BOOST_INDICATOR_CHARGING)
             player->boostChargeTimer = BOOST_CHARGE_SKIP_SECONDS;
+    }
+    // Analog steering, applied for the local pod only, immediately before the retail
+    // control routine reads these globals. Nothing runs in between, which is the whole
+    // point -- two earlier attempts set them further upstream and were overwritten.
+    //
+    // Only while the stick is off centre. At rest the game's own value passes through, so
+    // a wheel or pad still steers for someone in a headset who is driving with one; an
+    // unconditional write would pin their steering to a centred thumbstick.
+    //
+    // The GLOBAL is written rather than the local steerInput so the game's own
+    // invert-steering option still applies -- the retail code negates it itself.
+    if (player != nullptr && g_vr_analog_active != 0 &&
+        (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
+        if (g_vr_analog_steer > 0.02f || g_vr_analog_steer < -0.02f)
+            swrRace_SteeringInput = g_vr_analog_steer;
+        if (g_vr_analog_pitch > 0.02f || g_vr_analog_pitch < -0.02f)
+            swrRace_PitchInput = g_vr_analog_pitch;
+        static int vr_logged = 0;
+        if (!vr_logged) {
+            vr_logged = 1;
+            fprintf(hook_log, "[analog] override LIVE in UpdatePlayerControl_delta:"
+                              " steer=%.3f pitch=%.3f\n",
+                    g_vr_analog_steer, g_vr_analog_pitch);
+            fflush(hook_log);
+        }
     }
     hook_call_original((swrRace_UpdatePlayerControl_t) swrRace_UpdatePlayerControl_ADDR, player);
 }
