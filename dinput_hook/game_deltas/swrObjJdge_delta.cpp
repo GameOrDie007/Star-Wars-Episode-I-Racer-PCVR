@@ -22,6 +22,11 @@ extern FILE* hook_log;
 // Captured in swrRace_delta.cpp from the collision hook, which already runs per physics
 // step and already receives the local pod.
 extern swrRace* g_vr_local_player;
+// Analog steering override, consumed in swrRace_UpdatePlayerControl at the moment the
+// value is read. Defined in src/Swr/swrRace.c, which is C.
+extern "C" float g_vr_analog_steer;
+extern "C" float g_vr_analog_pitch;
+extern "C" int g_vr_analog_active;
 }
 
 #include "../hook_helper.h"
@@ -253,15 +258,16 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // a threshold is exactly the "dead zone then full tilt" players reported.
         const float deadzone = 0.35f;
 
-        // Analog path. swrRace_UpdatePlayerControl reads these float globals directly when
-        // the profile's control type selects the analog branch -- the same route an Xbox
-        // pad takes, which is why an Xbox pad feels smooth and injected arrow keys do not.
+        // Analog path. The value is handed to swrRace_UpdatePlayerControl, which applies it
+        // on the line that reads it -- setting swrRace_SteeringInput here instead does not
+        // survive, because the game's own input pass runs later in the frame and derives
+        // that global from the arrow keys at full deflection.
         //
-        // The previous attempt wrote stdControl_aAxisPos, which is raw DirectInput counts
-        // several stages upstream of this and needs a working joystick binding to ever
-        // reach the pod. That is why the toggle appeared to do nothing.
+        // The arrow keys below are deliberately NOT suppressed: they are also the hub and
+        // pause-menu navigation. In a race the override wins regardless, because it is
+        // applied after the game has finished deriving its own value.
         const bool analog = vr_analog_steering_enabled() != 0;
-        if (analog) {
+        {
             float s = steer;
             if (s > 1.0f)
                 s = 1.0f;
@@ -272,8 +278,9 @@ void stdControl_ReadControls_boostfix_delta(void) {
                 p = 1.0f;
             else if (p < -1.0f)
                 p = -1.0f;
-            swrRace_SteeringInput = s;
-            swrRace_PitchInput = p;
+            g_vr_analog_steer = s;
+            g_vr_analog_pitch = p;
+            g_vr_analog_active = analog ? 1 : 0;
         }
 
         // Up/Down arrows do double duty: pitch during a race, menu navigation everywhere
