@@ -304,13 +304,14 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_BRAKE, vr_input_brake() > 0.15f);
         // With analog on, the stick drives the axis; keep the key path off so the two do not
         // fight each other.
-        vr_hold_key(VRK_LEFT, !analog && steer < -deadzone);
-        vr_hold_key(VRK_RIGHT, !analog && steer > deadzone);
+        // NEVER gate these on analog. They are not only steering -- the hub and the pause
+        // menu navigate from these same arrow scancodes, so suppressing them removed all
+        // menu control as well as steering. Reported as 'no control anywhere'.
+        vr_hold_key(VRK_LEFT, steer < -deadzone);
+        vr_hold_key(VRK_RIGHT, steer > deadzone);
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
-        // Gated on !analog exactly like steering. Without this the analog global and the
-        // digital keys both drive pitch at once and fight each other.
-        vr_hold_key(VRK_NOSEDOWN, !analog && pitch > deadzone);
-        vr_hold_key(VRK_PULLUP, !analog && pitch < -deadzone);
+        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
+        vr_hold_key(VRK_PULLUP, pitch < -deadzone);
         // A short kick when boost engages. The same button confirms menu selections, so it
         // is keyed off the throttle rather than off any context test: you cannot be on the
         // throttle in a menu, and that needs nothing the game refuses to tell us.

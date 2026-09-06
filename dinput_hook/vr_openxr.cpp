@@ -191,7 +191,10 @@ struct VrState {
     // route the game's own analog controllers use; the previous implementation wrote a raw
     // DirectInput axis array several stages upstream and never reached the pod, which is
     // why the toggle appeared to do nothing.
-    bool analog_steering = true;
+    // OFF again. Writing the analog globals from the controls hook does not survive: the
+    // game's own input pass runs later in the frame and overwrites them, so the setting did
+    // nothing except suppress the keys. Needs a later injection point before it can be on.
+    bool analog_steering = false;
     bool suppress_flares = true;// screen-space flares cannot anchor to the world in VR
     // With the screen-space ones dropped, redraw the light streaks as real geometry in the world
     // so they sit on their lamp posts. Half-size in metres; a streetlight glow is about a metre.
