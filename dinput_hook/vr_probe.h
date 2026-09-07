@@ -178,6 +178,12 @@ int vr_wheel_suppress_game_input(void);
 int vr_wheel_throttle_axis(void);
 int vr_wheel_brake_axis(void);
 float vr_wheel_pedal_threshold(void);
+int vr_wheel_clutch_axis(void);
+// 0 = Slide, 1 = Boost, 2 = Look back.
+int vr_wheel_clutch_action(void);
+// Changes when the user asks for recalibration; the input layer forgets its learned
+// ranges when this differs from the value it last saw.
+int vr_wheel_recal_generation(void);
 // One raw DirectInput axis (0..14), for the axis picker. Returns 0 out of range.
 int vr_raw_axis(int i);
 

@@ -254,6 +254,9 @@ struct VrState {
     int wheel_throttle_axis = -1;
     int wheel_brake_axis = -1;
     float wheel_pedal_threshold = 0.15f;
+    // Third pedal. 0 = Slide, 1 = Boost, 2 = Look back.
+    int wheel_clutch_axis = -1;
+    int wheel_clutch_action = 0;
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -343,6 +346,10 @@ static void vr_settings_load(void) {
     g_s.wheel_brake_axis = (int) vr_ini_get_f("wheel_brake_axis", (float) g_s.wheel_brake_axis);
     g_s.wheel_pedal_threshold =
         vr_ini_get_f("wheel_pedal_threshold", g_s.wheel_pedal_threshold);
+    g_s.wheel_clutch_axis =
+        (int) vr_ini_get_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
+    g_s.wheel_clutch_action =
+        (int) vr_ini_get_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
     g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
     g_s.wheel_invert = vr_ini_get_b("wheel_invert", g_s.wheel_invert);
@@ -377,6 +384,8 @@ void vr_settings_save(void) {
     vr_ini_set_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
     vr_ini_set_f("wheel_brake_axis", (float) g_s.wheel_brake_axis);
     vr_ini_set_f("wheel_pedal_threshold", g_s.wheel_pedal_threshold);
+    vr_ini_set_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
+    vr_ini_set_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
     vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
     vr_ini_set_b("wheel_invert", g_s.wheel_invert);
@@ -1376,6 +1385,17 @@ int vr_wheel_brake_axis(void) {
 float vr_wheel_pedal_threshold(void) {
     return g_s.wheel_pedal_threshold;
 }
+int vr_wheel_clutch_axis(void) {
+    return g_s.wheel_clutch_axis;
+}
+int vr_wheel_clutch_action(void) {
+    return g_s.wheel_clutch_action;
+}
+// Bumped to ask the input layer to forget its learned wheel and pedal ranges.
+static int g_wheel_recal = 0;
+int vr_wheel_recal_generation(void) {
+    return g_wheel_recal;
+}
 int vr_wheel_range(void) {
     return g_s.wheel_range;
 }
@@ -1754,6 +1774,13 @@ void vr_probe_draw_imgui(void) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("If the pedals are the wrong way round, swap these two numbers.");
     ImGui::SliderFloat("Pedal threshold", &g_s.wheel_pedal_threshold, 0.02f, 0.60f, "%.2f");
+    ImGui::SliderInt("Clutch axis", &g_s.wheel_clutch_axis, -1, 14);
+    ImGui::Combo("Clutch does", &g_s.wheel_clutch_action, "Slide\0Boost\0Look back\0");
+    if (ImGui::Button("Recalibrate wheel and pedals")) {
+        g_wheel_recal++;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("then turn lock to lock and floor each pedal");
     ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
     ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
     if (ImGui::IsItemHovered())
