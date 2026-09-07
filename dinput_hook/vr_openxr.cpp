@@ -237,6 +237,17 @@ struct VrState {
     // deadband the controllers hum continuously. Provisional -- the logged peak calibrates
     // it, exactly as the pod-impact scale was calibrated.
     float haptic_wall_deadband = 1.5f;
+    // --- Wheel / joystick steering -------------------------------------------------
+    // Reads a raw DirectInput axis and drives steering from it directly, skipping the
+    // game's own axis binding. -1 disables it. Which axis a given wheel lands on is not
+    // predictable, so the panel shows every axis live and the user picks the one that
+    // moves. Off by default: this is written without a wheel to test against.
+    int wheel_steer_axis = -1;
+    // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
+    // to that, which self-calibrates after one full turn in each direction.
+    int wheel_range = 0;
+    float wheel_deadzone = 0.05f;
+    bool wheel_invert = false;
     // Measured, not guessed: the pod's world-space bounds span 17 game units and a podracer is
     // about 7 m, so 2.4 units/m sizes the world correctly. The earlier 3.2 was picked by eye while
     // the stereo image was still broken and made everything about a third too small.
@@ -313,6 +324,10 @@ static void vr_settings_load(void) {
     g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
+    g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
+    g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
+    g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
+    g_s.wheel_invert = vr_ini_get_b("wheel_invert", g_s.wheel_invert);
 }
 
 void vr_settings_save(void) {
@@ -339,6 +354,10 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
+    vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
+    vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
+    vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
+    vr_ini_set_b("wheel_invert", g_s.wheel_invert);
 }
 
 static void xr_logf(const char *fmt, ...) {
@@ -1320,6 +1339,19 @@ float vr_flare_size_units(void) {
                                    : 1.0f);
 }
 
+int vr_wheel_steer_axis(void) {
+    return g_s.wheel_steer_axis;
+}
+int vr_wheel_range(void) {
+    return g_s.wheel_range;
+}
+float vr_wheel_deadzone(void) {
+    return g_s.wheel_deadzone;
+}
+int vr_wheel_invert(void) {
+    return g_s.wheel_invert ? 1 : 0;
+}
+
 int vr_analog_steering_enabled(void) {
     return g_s.analog_steering ? 1 : 0;
 }
@@ -1668,6 +1700,37 @@ void vr_probe_draw_imgui(void) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Walls, terrain and crashes, from a sudden speed drop.");
     ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
+
+    ImGui::SeparatorText("Wheel / joystick steering (experimental)");
+    ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
+                       "axis binding. Turn the wheel and watch which axis below moves, then\n"
+                       "set that number. -1 is off.");
+    ImGui::SliderInt("Steer axis", &g_s.wheel_steer_axis, -1, 14);
+    ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
+    ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
+    ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Raw counts at full lock. Auto scales to the largest value seen,\n"
+                          "so one full turn each way calibrates it.");
+    {
+        // Only axes that are actually moving, so the list stays readable in a headset --
+        // a device with 15 dead axes would otherwise bury the one that matters.
+        static int seen[15] = {};
+        int shown = 0;
+        for (int i = 0; i < 15; i++) {
+            const int v = vr_raw_axis(i);
+            const int mag = v < 0 ? -v : v;
+            if (mag > seen[i])
+                seen[i] = mag;
+            if (seen[i] > 64 || i == g_s.wheel_steer_axis) {
+                ImGui::Text("axis %2d: %8d   (peak %d)%s", i, v, seen[i],
+                            i == g_s.wheel_steer_axis ? "  <- selected" : "");
+                shown++;
+            }
+        }
+        if (shown == 0)
+            ImGui::TextDisabled("no axis has moved yet - turn the wheel");
+    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Speed drop below this is treated as braking, not an impact.\n"
                           "Raise it if the controllers hum while simply slowing down.");
