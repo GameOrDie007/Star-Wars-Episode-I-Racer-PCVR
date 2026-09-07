@@ -171,6 +171,8 @@ void vr_haptic_event(float amplitude, float duration_ms);
 int vr_wheel_steer_axis(void);
 int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
 float vr_wheel_deadzone(void);
+// Full steering at this fraction of the wheel's travel; higher is sharper.
+float vr_wheel_sensitivity(void);
 int vr_wheel_invert(void);
 // Non-zero to stop the GAME acting on the joystick while we still read its axes.
 int vr_wheel_suppress_game_input(void);

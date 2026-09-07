@@ -261,6 +261,11 @@ struct VrState {
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
     float wheel_deadzone = 0.05f;
+    // Full steering is reached at this fraction of the wheel's measured travel. A G923
+    // turns 900 degrees lock to lock and a podracer wants a quick input, so using the
+    // whole span feels lifeless however well it is calibrated. 2.5 means full lock at
+    // roughly 40% of the wheel's travel, or about 180 degrees each way.
+    float wheel_sensitivity = 2.5f;
     bool wheel_invert = false;
     // Measured, not guessed: the pod's world-space bounds span 17 game units and a podracer is
     // about 7 m, so 2.4 units/m sizes the world correctly. The earlier 3.2 was picked by eye while
@@ -352,6 +357,7 @@ static void vr_settings_load(void) {
         (int) vr_ini_get_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
     g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
+    g_s.wheel_sensitivity = vr_ini_get_f("wheel_sensitivity", g_s.wheel_sensitivity);
     g_s.wheel_invert = vr_ini_get_b("wheel_invert", g_s.wheel_invert);
 }
 
@@ -388,6 +394,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
     vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
+    vr_ini_set_f("wheel_sensitivity", g_s.wheel_sensitivity);
     vr_ini_set_b("wheel_invert", g_s.wheel_invert);
 }
 
@@ -1402,6 +1409,9 @@ int vr_wheel_range(void) {
 float vr_wheel_deadzone(void) {
     return g_s.wheel_deadzone;
 }
+float vr_wheel_sensitivity(void) {
+    return g_s.wheel_sensitivity;
+}
 int vr_wheel_invert(void) {
     return g_s.wheel_invert ? 1 : 0;
 }
@@ -1769,6 +1779,10 @@ void vr_probe_draw_imgui(void) {
                           "game acting on them. Turn off to use the game's own joystick\n"
                           "support instead.");
     ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
+    ImGui::SliderFloat("Wheel sensitivity", &g_s.wheel_sensitivity, 0.5f, 6.0f, "%.2fx");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Higher = full steering with less turn. 1.0 uses the wheel's\n"
+                          "whole travel, which on a 900-degree wheel is very slow.");
     ImGui::SliderInt("Throttle axis", &g_s.wheel_throttle_axis, -1, 14);
     ImGui::SliderInt("Brake axis", &g_s.wheel_brake_axis, -1, 14);
     if (ImGui::IsItemHovered())
