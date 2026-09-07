@@ -265,7 +265,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // callers for one scancode would fight -- vr_hold_key keeps a single was[] per key, so
     // whichever ran second would clear the other's press the same frame.
     bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
-    bool wbtn[7] = {};// indexed by action id
+    bool wbtn[8] = {};// indexed by action id
     {
         const int base = vr_wheel_dpad_base();
         if (base >= 0 && base + 3 < 528) {
@@ -279,7 +279,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0)
                 continue;
             int act = vr_wheel_btn_action(s);
-            if (act < 0 || act > 6)
+            if (act < 0 || act > 7)
                 act = 0;
             wbtn[act] = true;
         }
@@ -522,7 +522,9 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_LEFT, steer < -deadzone || wdp_l);
         vr_hold_key(VRK_RIGHT, steer > deadzone || wdp_r);
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
-        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone || wdp_u);
+        // Charge boost shares the nose-down key: that IS the game's charge input, so a wheel
+        // user can hold a button instead of needing a D-pad direction while steering.
+        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone || wdp_u || wbtn[7]);
         vr_hold_key(VRK_PULLUP, pitch < -deadzone || wdp_d);
         // A short kick when boost engages. The same button confirms menu selections, so it
         // is keyed off the throttle rather than off any context test: you cannot be on the
@@ -599,7 +601,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
     if (!vr_input_available()) {
         vr_hold_key(VRK_LEFT, wdp_l);
         vr_hold_key(VRK_RIGHT, wdp_r);
-        vr_hold_key(VRK_NOSEDOWN, wdp_u);
+        vr_hold_key(VRK_NOSEDOWN, wdp_u || wbtn[7]);
         vr_hold_key(VRK_PULLUP, wdp_d);
         vr_hold_key(VRK_BOOST, wbtn[0]);
         vr_hold_key(VRK_SLIDE, wbtn[1]);
