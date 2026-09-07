@@ -379,6 +379,31 @@ void stdControl_ReadControls_boostfix_delta(void) {
         }
     }
 
+    // The game's OTHER button array, plus the count it thinks the device has. The key-array
+    // scan below covers what the game maps into scancodes; this covers what its joystick path
+    // records directly. A button the hardware reports but the game never maps would be
+    // invisible to the first and visible here.
+    {
+        static int jb_logged[15];
+        static int jb_init = 0;
+        if (!jb_init) {
+            jb_init = 1;
+            for (int i = 0; i < 15; i++)
+                jb_logged[i] = 0;
+            fprintf(hook_log, "[button] game reports %d joystick buttons, %d axes\n",
+                    swrConfig_joystickNbButtons, swrConfig_joystickNbAxis);
+            fflush(hook_log);
+        }
+        for (int i = 0; i < 15; i++) {
+            if (jb_logged[i] || JoystickButtonPressedInput[i] == 0.0f)
+                continue;
+            jb_logged[i] = 1;
+            fprintf(hook_log, "[button] JoystickButtonPressedInput[%d] DOWN (%.2f)\n", i,
+                    JoystickButtonPressedInput[i]);
+            fflush(hook_log);
+        }
+    }
+
     // Button scan. aKeyInfos is int[528] and keyboard scancodes stop at 255, so 256..527
     // are the other devices -- joystick buttons and, usually, the POV hat as separate
     // directions. One line per index, the first time it goes down.
