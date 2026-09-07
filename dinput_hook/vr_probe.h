@@ -172,6 +172,8 @@ int vr_wheel_steer_axis(void);
 int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
 float vr_wheel_deadzone(void);
 int vr_wheel_invert(void);
+// Non-zero to stop the GAME acting on the joystick while we still read its axes.
+int vr_wheel_suppress_game_input(void);
 // One raw DirectInput axis (0..14), for the axis picker. Returns 0 out of range.
 int vr_raw_axis(int i);
 
