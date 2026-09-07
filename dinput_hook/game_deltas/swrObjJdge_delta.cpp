@@ -267,16 +267,44 @@ void stdControl_ReadControls_boostfix_delta(void) {
     bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
     bool wbtn[8] = {};// indexed by action id
     {
-        const int base = vr_wheel_dpad_base();
-        if (base >= 0 && base + 3 < 528) {
-            wdp_l = stdControl_aKeyInfos[base + 0] != 0;
-            wdp_u = stdControl_aKeyInfos[base + 1] != 0;
-            wdp_r = stdControl_aKeyInfos[base + 2] != 0;
-            wdp_d = stdControl_aKeyInfos[base + 3] != 0;
+        // A control that rests in the DOWN state would otherwise be held forever. The pedals
+        // already rest at full deflection on their axes, so this is not hypothetical -- and a
+        // stuck index bound to Confirm injects Enter every frame, which makes the menus fire
+        // continuously and the keyboard appear dead. Capture what is down while untouched and
+        // ignore exactly those.
+        static int btn_rest[528];
+        static int rest_ready = 0;
+        static int rest_frames = 0;
+        if (!rest_ready) {
+            // Not the very first frame: the input arrays are not populated yet then, and a rest
+            // state of all-zero would defeat the whole check.
+            if (++rest_frames >= 30) {
+                rest_ready = 1;
+                int stuck = 0;
+                for (int i = 0; i < 528; i++) {
+                    btn_rest[i] = (i >= 256) ? (stdControl_aKeyInfos[i] != 0) : 0;
+                    if (btn_rest[i]) {
+                        stuck++;
+                        fprintf(hook_log,
+                                "[button] index %d is DOWN AT REST - ignoring it this session\n",
+                                i);
+                    }
+                }
+                if (stuck)
+                    fflush(hook_log);
+            }
         }
-        for (int s = 0; s < 8; s++) {
+
+        const int base = vr_wheel_dpad_base();
+        if (rest_ready && base >= 0 && base + 3 < 528) {
+            wdp_l = stdControl_aKeyInfos[base + 0] != 0 && !btn_rest[base + 0];
+            wdp_u = stdControl_aKeyInfos[base + 1] != 0 && !btn_rest[base + 1];
+            wdp_r = stdControl_aKeyInfos[base + 2] != 0 && !btn_rest[base + 2];
+            wdp_d = stdControl_aKeyInfos[base + 3] != 0 && !btn_rest[base + 3];
+        }
+        for (int s = 0; rest_ready && s < 8; s++) {
             const int bi = vr_wheel_btn_index(s);
-            if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0)
+            if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
                 continue;
             int act = vr_wheel_btn_action(s);
             if (act < 0 || act > 7)
