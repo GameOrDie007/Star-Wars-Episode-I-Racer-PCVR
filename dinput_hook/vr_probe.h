@@ -169,6 +169,8 @@ void vr_haptic_event(float amplitude, float duration_ms);
 // the step a wheel appears to fall down on: the axes reach stdControl_aAxisPos, but do not
 // reach the pod unless the profile binds them.
 // Master switch. Every other wheel accessor reports 'off' when this is 0.
+// Draws the wheel / pedal settings. Called from the Input panel.
+void vr_draw_wheel_settings(void);
 int vr_wheel_enabled(void);
 // Restore the wheel's centring spring, which DirectInput disables on acquisition.
 int vr_wheel_autocenter(void);

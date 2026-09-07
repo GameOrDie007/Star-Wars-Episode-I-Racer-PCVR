@@ -173,7 +173,8 @@ struct VrState {
     bool submit_enabled = true;
     bool head_drives_camera = true;
     bool swap_eye_order = false;
-    float menu_shift = 1.0f;
+    // 0.0 is the tested value; 1.0 was a default nobody has played with.
+    float menu_shift = 0.0f;
     bool dump_eyes = false;
     // On by default now that the layer composite is correct. It was off while the composite
     // was landing in a dead branch, because enabling it then hid the HUD everywhere.
@@ -182,9 +183,11 @@ struct VrState {
     // started scaling the VR quad: at the old 0.70 default every VR user's panel would
     // silently shrink by 30% compared to before, since the setting previously did nothing
     // in the headset at all.
-    float hud_scale = 1.00f;
+    // 1.11, adopted from the tuned config after months of play rather than picked. The
+    // shipped archive contains no ini, so compiled defaults ARE what a new player gets.
+    float hud_scale = 1.11f;
     // F5 overlay magnification in VR only; flat play keeps its native size.
-    float overlay_scale = 1.8f;
+    float overlay_scale = 1.65f;
     float cull_fov_boost = 2.0f;
     bool render_all_selectors = false;
     // On by default from v1.2. It writes swrRace_SteeringInput directly, which is the
@@ -1732,6 +1735,95 @@ void vr_poll_recenter_chord(void);
     }
 }
 
+
+// Wheel and pedal settings. Drawn in the INPUT panel, not the VR one: a wheel is input, and
+// it works with no headset at all. Kept here because every setting it touches lives in this
+// file's settings struct.
+extern "C" void vr_draw_wheel_settings(void) {
+    ImGui::SeparatorText("Wheel / joystick steering (experimental)");
+    ImGui::Checkbox("Enable wheel support", &g_s.wheel_enabled);
+    ImGui::Checkbox("Restore wheel centring spring", &g_s.wheel_autocenter);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The game switches the wheel's autocentre off when it takes the\n"
+                          "device and never replaces it, leaving the wheel slack and the\n"
+                          "steering twitchy. Takes effect on the next launch.");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Leave OFF unless you are using a wheel. A gamepad shares the\n"
+                          "same axis and button numbers, so wheel support cannot be\n"
+                          "detected automatically and would fight a pad if left on.");
+    ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
+                       "axis binding. Turn the wheel and watch which axis below moves, then\n"
+                       "set that number. -1 is off.");
+    ImGui::SliderInt("Steer axis", &g_s.wheel_steer_axis, -1, 14);
+    ImGui::Checkbox("Stop the game reading the joystick itself",
+                    &g_s.wheel_suppress_game_input);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Wheel pedals rest at full deflection, which the game treats as\n"
+                          "a held input -- menus move on their own and the keyboard seems\n"
+                          "dead. This leaves the axes readable for steering but stops the\n"
+                          "game acting on them. Turn off to use the game's own joystick\n"
+                          "support instead.");
+    ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
+    ImGui::SliderFloat("Wheel sensitivity", &g_s.wheel_sensitivity, 0.5f, 6.0f, "%.2fx");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Higher = full steering with less turn. 1.0 uses the wheel's\n"
+                          "whole travel, which on a 900-degree wheel is very slow.");
+    ImGui::SliderInt("Throttle axis", &g_s.wheel_throttle_axis, -1, 14);
+    ImGui::SliderInt("Brake axis", &g_s.wheel_brake_axis, -1, 14);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("If the pedals are the wrong way round, swap these two numbers.");
+    ImGui::SliderFloat("Pedal threshold", &g_s.wheel_pedal_threshold, 0.02f, 0.60f, "%.2f");
+    ImGui::SliderInt("Clutch axis", &g_s.wheel_clutch_axis, -1, 14);
+    ImGui::SliderInt("D-pad base index", &g_s.wheel_dpad_base, -1, 520);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The four directions are consecutive from here:\n"
+                          "base+0 Left, +1 Up, +2 Right, +3 Down. 272 on a G923.");
+    for (int i = 0; i < 10; i++) {
+        char lbl[32];
+        snprintf(lbl, sizeof(lbl), "Button %d index", i + 1);
+        ImGui::SliderInt(lbl, &g_s.wheel_btn_index[i], -1, 520);
+        snprintf(lbl, sizeof(lbl), "Button %d does", i + 1);
+        ImGui::Combo(lbl, &g_s.wheel_btn_action[i],
+                     "Boost\0Slide\0Look back\0Confirm\0Back / pause\0Repair\0Camera\0"
+                     "Charge boost (hold)\0Roll left\0Roll right\0");
+        if (i == 0 && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Charge boost is the game's hold-up-to-charge input. Put it on a\n"
+                              "button you can hold while steering, then fire with Boost. It\n"
+                              "pitches the nose down while held - that is the game's own trade,\n"
+                              "not something the mod adds.");
+    }
+    ImGui::Combo("Clutch does", &g_s.wheel_clutch_action, "Slide\0Boost\0Look back\0");
+    if (ImGui::Button("Recalibrate wheel and pedals")) {
+        g_wheel_recal++;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("then turn lock to lock and floor each pedal");
+    ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
+    ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Raw counts at full lock. Auto scales to the largest value seen,\n"
+                          "so one full turn each way calibrates it.");
+    {
+        // Only axes that are actually moving, so the list stays readable in a headset --
+        // a device with 15 dead axes would otherwise bury the one that matters.
+        static int seen[15] = {};
+        int shown = 0;
+        for (int i = 0; i < 15; i++) {
+            const int v = vr_raw_axis(i);
+            const int mag = v < 0 ? -v : v;
+            if (mag > seen[i])
+                seen[i] = mag;
+            if (seen[i] > 64 || i == g_s.wheel_steer_axis) {
+                ImGui::Text("axis %2d: %8d   (peak %d)%s", i, v, seen[i],
+                            i == g_s.wheel_steer_axis ? "  <- selected" : "");
+                shown++;
+            }
+        }
+        if (shown == 0)
+            ImGui::TextDisabled("no axis has moved yet - turn the wheel");
+    }
+}
+
 void vr_probe_draw_imgui(void) {
     // Snapshot, compare at the end, write only on change: no Save button to forget, and no
     // ini write every frame.
@@ -1820,88 +1912,6 @@ void vr_probe_draw_imgui(void) {
         ImGui::SetTooltip("Walls, terrain and crashes, from a sudden speed drop.");
     ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
 
-    ImGui::SeparatorText("Wheel / joystick steering (experimental)");
-    ImGui::Checkbox("Enable wheel support", &g_s.wheel_enabled);
-    ImGui::Checkbox("Restore wheel centring spring", &g_s.wheel_autocenter);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The game switches the wheel's autocentre off when it takes the\n"
-                          "device and never replaces it, leaving the wheel slack and the\n"
-                          "steering twitchy. Takes effect on the next launch.");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Leave OFF unless you are using a wheel. A gamepad shares the\n"
-                          "same axis and button numbers, so wheel support cannot be\n"
-                          "detected automatically and would fight a pad if left on.");
-    ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
-                       "axis binding. Turn the wheel and watch which axis below moves, then\n"
-                       "set that number. -1 is off.");
-    ImGui::SliderInt("Steer axis", &g_s.wheel_steer_axis, -1, 14);
-    ImGui::Checkbox("Stop the game reading the joystick itself",
-                    &g_s.wheel_suppress_game_input);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Wheel pedals rest at full deflection, which the game treats as\n"
-                          "a held input -- menus move on their own and the keyboard seems\n"
-                          "dead. This leaves the axes readable for steering but stops the\n"
-                          "game acting on them. Turn off to use the game's own joystick\n"
-                          "support instead.");
-    ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
-    ImGui::SliderFloat("Wheel sensitivity", &g_s.wheel_sensitivity, 0.5f, 6.0f, "%.2fx");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Higher = full steering with less turn. 1.0 uses the wheel's\n"
-                          "whole travel, which on a 900-degree wheel is very slow.");
-    ImGui::SliderInt("Throttle axis", &g_s.wheel_throttle_axis, -1, 14);
-    ImGui::SliderInt("Brake axis", &g_s.wheel_brake_axis, -1, 14);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("If the pedals are the wrong way round, swap these two numbers.");
-    ImGui::SliderFloat("Pedal threshold", &g_s.wheel_pedal_threshold, 0.02f, 0.60f, "%.2f");
-    ImGui::SliderInt("Clutch axis", &g_s.wheel_clutch_axis, -1, 14);
-    ImGui::SliderInt("D-pad base index", &g_s.wheel_dpad_base, -1, 520);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The four directions are consecutive from here:\n"
-                          "base+0 Left, +1 Up, +2 Right, +3 Down. 272 on a G923.");
-    for (int i = 0; i < 10; i++) {
-        char lbl[32];
-        snprintf(lbl, sizeof(lbl), "Button %d index", i + 1);
-        ImGui::SliderInt(lbl, &g_s.wheel_btn_index[i], -1, 520);
-        snprintf(lbl, sizeof(lbl), "Button %d does", i + 1);
-        ImGui::Combo(lbl, &g_s.wheel_btn_action[i],
-                     "Boost\0Slide\0Look back\0Confirm\0Back / pause\0Repair\0Camera\0"
-                     "Charge boost (hold)\0Roll left\0Roll right\0");
-        if (i == 0 && ImGui::IsItemHovered())
-            ImGui::SetTooltip("Charge boost is the game's hold-up-to-charge input. Put it on a\n"
-                              "button you can hold while steering, then fire with Boost. It\n"
-                              "pitches the nose down while held - that is the game's own trade,\n"
-                              "not something the mod adds.");
-    }
-    ImGui::Combo("Clutch does", &g_s.wheel_clutch_action, "Slide\0Boost\0Look back\0");
-    if (ImGui::Button("Recalibrate wheel and pedals")) {
-        g_wheel_recal++;
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("then turn lock to lock and floor each pedal");
-    ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
-    ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Raw counts at full lock. Auto scales to the largest value seen,\n"
-                          "so one full turn each way calibrates it.");
-    {
-        // Only axes that are actually moving, so the list stays readable in a headset --
-        // a device with 15 dead axes would otherwise bury the one that matters.
-        static int seen[15] = {};
-        int shown = 0;
-        for (int i = 0; i < 15; i++) {
-            const int v = vr_raw_axis(i);
-            const int mag = v < 0 ? -v : v;
-            if (mag > seen[i])
-                seen[i] = mag;
-            if (seen[i] > 64 || i == g_s.wheel_steer_axis) {
-                ImGui::Text("axis %2d: %8d   (peak %d)%s", i, v, seen[i],
-                            i == g_s.wheel_steer_axis ? "  <- selected" : "");
-                shown++;
-            }
-        }
-        if (shown == 0)
-            ImGui::TextDisabled("no axis has moved yet - turn the wheel");
-    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Speed drop below this is treated as braking, not an impact.\n"
                           "Raise it if the controllers hum while simply slowing down.");
