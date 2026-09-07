@@ -1706,6 +1706,35 @@ extern "C" float swrObjJdge_UpdateLetterbox(float dt) {
 void swrObjJdge_F0_delta(swrObjJdge *jdge) {
     const int state = jdge->flag & 0xf;
 
+    // Post-race trace (diagnostic, v1.2.1 investigation). Crossing the line sent one tester
+    // straight back to the hub: no finish coast, no camera sweep, no results. States 3, 4 and 5
+    // each advance on KeyDownForPlayer1Or2 or swrControl_acceptPressedEdge, and this mod both
+    // injects synthetic accept events for menu navigation AND clears those same bits in states
+    // 4/5 -- while calling those states pre-race, which the decompilation calls post-race.
+    // Rather than reason about which is wrong, record what was actually live on every frame of
+    // the tail. Armed while racing so it always covers the frames after the line, and bounded so
+    // it cannot fill the log.
+    {
+        static int trace_left = 0;
+        static int last_traced = -1;
+        if (state == 2)
+            trace_left = 400;
+        if (trace_left > 0 && (state >= 2 || last_traced >= 2)) {
+            trace_left--;
+            if (state != last_traced || state >= 3) {
+                fprintf(hook_log,
+                        "[postrace] state=%d flag=0x%08x acceptEdge=%d bitset0=0x%08x "
+                        "bitset1=0x%08x skipEdge=%d orbitFrames=%d boost=%d\n",
+                        state, (unsigned) jdge->flag, (int) swrControl_acceptPressedEdge,
+                        (unsigned) inRaceLocalPlayerInputBitset1[0],
+                        (unsigned) inRaceLocalPlayerInputBitset1[1], g_cutscene_skip_edge,
+                        g_skip_orbit_frames, vr_input_boost());
+                fflush(hook_log);
+            }
+            last_traced = state;
+        }
+    }
+
     // Fast restart (speedrunner hotkey): after a fast restart, advance the judge past the pre-race
     // track sweep + pod orbit straight to the countdown -- regardless of the cutscene toggles. Armed
     // for a short frame window after a restart (g_skip_orbit_frames). The actual advance is driven by
@@ -1764,6 +1793,11 @@ void swrObjJdge_F0_delta(swrObjJdge *jdge) {
         const bool skipStage = fast_restart_skip || g_cutscene_skip_edge ||
                                (state == 5 && imgui_state.skip_prerace_camera);
         if (skipStage) {
+            fprintf(hook_log,
+                    "[postrace] mod skipStage FIRED state=%d fastRestart=%d skipEdge=%d toggle=%d\n",
+                    state, (int) fast_restart_skip, g_cutscene_skip_edge,
+                    (int) (state == 5 && imgui_state.skip_prerace_camera));
+            fflush(hook_log);
             if (state == 4)
                 jdge->camSweepState = NULL;// end the sweep -> the game advances to the orbit
             else

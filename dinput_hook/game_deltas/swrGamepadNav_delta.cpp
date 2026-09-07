@@ -97,6 +97,8 @@ static XInputGetState_t p_XInputGetState = nullptr;
 static bool g_xinputTried = false;
 static int g_padIndex = -1;       // currently connected pad (0..3), -1 = none
 static uint32_t g_lastScanMs = 0; // last time we scanned for a pad
+static int g_scanSlot = 0;        // round-robin cursor over the empty slots
+static uint32_t g_scanIntervalMs = 1000;// backs off while nothing is found
 
 // Latched controller state, refreshed once per present by swrGamepadNav_Poll.
 static WORD g_held = 0;   // buttons currently down
@@ -121,23 +123,64 @@ static void nav_load_xinput() {
     fflush(hook_log);
 }
 
-// Find the first connected pad. Rescans at most once a second so an unplugged /
-// late-plugged controller is picked up without polling every slot every frame.
+// Look for a newly connected pad.
+//
+// XInputGetState on a DISCONNECTED slot is expensive: it drops into device enumeration in the
+// Xbox input stack, and Microsoft's guidance is not to call it per-frame for empty slots. The
+// rate limit here used to read `g_padIndex >= 0 && (now - g_lastScanMs) < 1000`, which applied
+// it ONLY when a pad was already connected -- so with nothing plugged in, the normal case for a
+// VR player on Touch controllers, all four empty slots were probed every single frame.
+//
+// That measured as a 130-160 ms freeze about once a second, in menus as much as mid-race,
+// unaffected by scene complexity, AI LOD or the wheel. It was the entire stutter report.
+//
+// So: one slot per scan rather than four, backing off while nothing is found. A pad connected
+// mid-session is still picked up within a few seconds, for the cost of a single call.
 static void nav_refresh_pad(uint32_t now) {
-    if (g_padIndex >= 0 && (now - g_lastScanMs) < 1000)
+    if (g_padIndex >= 0)
+        return;// have one already -- polled directly below, and cleared there if it fails
+    if ((uint32_t) (now - g_lastScanMs) < g_scanIntervalMs)
         return;
     g_lastScanMs = now;
-    for (DWORD i = 0; i < XUSER_MAX_COUNT; i++) {
-        XINPUT_STATE st;
-        if (p_XInputGetState(i, &st) == ERROR_SUCCESS) {
-            g_padIndex = (int) i;
-            return;
-        }
+
+    const DWORD slot = (DWORD) g_scanSlot;
+    g_scanSlot = (g_scanSlot + 1) % XUSER_MAX_COUNT;
+
+    const uint32_t t0 = GetTickCount();
+    XINPUT_STATE st;
+    const bool found = p_XInputGetState(slot, &st) == ERROR_SUCCESS;
+    const uint32_t cost = GetTickCount() - t0;
+    // Prove the cost rather than assume it. A probe of an empty slot should be microseconds;
+    // anything visible here is the stall, and it is worth knowing if it comes back.
+    if (cost >= 5) {
+        fprintf(hook_log, "[gamepad-nav] XInput probe of empty slot %lu took %lu ms\n",
+                (unsigned long) slot, (unsigned long) cost);
+        fflush(hook_log);
     }
-    g_padIndex = -1;
+
+    if (found) {
+        g_padIndex = (int) slot;
+        g_scanIntervalMs = 1000;
+        fprintf(hook_log, "[gamepad-nav] pad connected in slot %lu\n", (unsigned long) slot);
+        fflush(hook_log);
+        return;
+    }
+    // Nothing there. Slow down, to a cap -- a full sweep of four slots then costs one call
+    // every four seconds instead of four every frame.
+    if (g_scanIntervalMs < 4000)
+        g_scanIntervalMs += 500;
 }
 
 void swrGamepadNav_Poll(void) {
+    // Gate the POLL, not just the consumers. This setting previously gated only the code that
+    // reads g_pressed, so turning gamepad navigation off still paid the full XInput cost every
+    // frame. Anyone who does not want this feature should not be charged for it.
+    if (!imgui_state.enable_gamepad_nav) {
+        g_pressed = 0;
+        g_held = 0;
+        g_prevButtons = 0;
+        return;
+    }
     if (!g_xinputTried)
         nav_load_xinput();
     if (!p_XInputGetState)
@@ -154,7 +197,10 @@ void swrGamepadNav_Poll(void) {
             // the game's own DirectInput menu-nav; bridging it here would double every step.
             buttons = st.Gamepad.wButtons;
         } else {
-            g_padIndex = -1;// likely unplugged; rescan next frame
+            // Unplugged. Rescanning is the expensive path, so let nav_refresh_pad's backoff
+            // handle it rather than probing every slot on the next frame.
+            g_padIndex = -1;
+            g_scanIntervalMs = 1000;
         }
     }
     g_pressed = buttons & ~g_prevButtons;

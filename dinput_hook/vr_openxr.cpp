@@ -66,6 +66,8 @@ static PFN_xrReleaseSwapchainImage p_xrReleaseSwapchainImage = nullptr;
 static PFN_xrBeginSession p_xrBeginSession = nullptr;
 static PFN_xrEndSession p_xrEndSession = nullptr;
 static PFN_xrWaitFrame p_xrWaitFrame = nullptr;
+// Milliseconds spent blocked inside the most recent xrWaitFrame.
+static double g_last_wait_ms = 0.0;
 static PFN_xrBeginFrame p_xrBeginFrame = nullptr;
 static PFN_xrEndFrame p_xrEndFrame = nullptr;
 static PFN_xrLocateViews p_xrLocateViews = nullptr;
@@ -972,7 +974,19 @@ void vr_begin_frame(void) {
 
     g_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
     XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
-    if (XR_FAILED(p_xrWaitFrame(g_session, &fwi, &g_frame_state)))
+    // xrWaitFrame is where the runtime throttles the application to the display cadence.
+    // Timed on its own because a stall inside it means the compositor or the streaming link
+    // held us, while a stall outside it is our own render -- and those have nothing in common
+    // as problems.
+    LARGE_INTEGER wf0, wf1, wff;
+    QueryPerformanceFrequency(&wff);
+    QueryPerformanceCounter(&wf0);
+    const XrResult wf_res = p_xrWaitFrame(g_session, &fwi, &g_frame_state);
+    QueryPerformanceCounter(&wf1);
+    g_last_wait_ms = (wff.QuadPart != 0)
+                         ? 1000.0 * (double) (wf1.QuadPart - wf0.QuadPart) / (double) wff.QuadPart
+                         : 0.0;
+    if (XR_FAILED(wf_res))
         return;
 
     XrFrameBeginInfo fbi{XR_TYPE_FRAME_BEGIN_INFO};
@@ -1015,6 +1029,73 @@ void vr_begin_frame(void) {
     g_s.pos_z = g_views[0].pose.position.z;
 
     vr_input_poll();
+
+    // Frame pacing. A performance complaint needs a distribution, not an average: a steady 88
+    // and a 90 that drops a frame every second feel completely different and have different
+    // causes, yet both read as "high 80s" on an FPS counter. QueryPerformanceCounter because
+    // the thing being measured is finer than timeGetTime's resolution.
+    //
+    // Insertion sort over 300 samples, once every 300 frames -- a few microseconds, far below
+    // the noise floor of what it is measuring.
+    {
+        static LARGE_INTEGER perf_freq = {};
+        static LARGE_INTEGER perf_prev = {};
+        static double perf_win[300];
+        static double perf_wait[300];
+        static int perf_n = 0;
+        LARGE_INTEGER perf_now;
+        if (perf_freq.QuadPart == 0)
+            QueryPerformanceFrequency(&perf_freq);
+        QueryPerformanceCounter(&perf_now);
+        if (perf_prev.QuadPart != 0 && perf_freq.QuadPart != 0) {
+            const double ms = 1000.0 * (double) (perf_now.QuadPart - perf_prev.QuadPart) /
+                              (double) perf_freq.QuadPart;
+            // Log the outliers as they happen, with a frame number, so a stall can be lined up
+            // against everything else in the log. The distribution below says stalls exist; this
+            // says WHEN, which is the part that identifies them.
+            if (ms > 50.0)
+                xr_logf("[perf] STALL %.1f ms at frame %lu -- %.1f ms blocked in xrWaitFrame, "
+                        "%.1f ms our own work (%s)",
+                        ms, g_s.frames, g_last_wait_ms, ms - g_last_wait_ms,
+                        g_last_wait_ms > 0.5 * ms ? "RUNTIME/COMPOSITOR" : "APP");
+            if (perf_n < 300) {
+                perf_wait[perf_n] = g_last_wait_ms;
+                perf_win[perf_n++] = ms;
+            }
+            if (perf_n == 300) {
+                double s[300];
+                for (int i = 0; i < 300; i++)
+                    s[i] = perf_win[i];
+                for (int i = 1; i < 300; i++) {
+                    const double k = s[i];
+                    int j = i - 1;
+                    while (j >= 0 && s[j] > k) {
+                        s[j + 1] = s[j];
+                        j--;
+                    }
+                    s[j + 1] = k;
+                }
+                double sum = 0.0;
+                int over = 0;
+                for (int i = 0; i < 300; i++) {
+                    sum += perf_win[i];
+                    if (perf_win[i] > 12.5)// a dropped frame at 90 Hz
+                        over++;
+                }
+                double wsum = 0.0;
+                for (int i = 0; i < 300; i++)
+                    wsum += perf_wait[i];
+                const double mean = sum / 300.0;
+                xr_logf("[perf] frame ms  mean %.2f (%.1f fps)  p50 %.2f  p95 %.2f  p99 %.2f  "
+                        "max %.2f  dropped %d/300 (%.1f%%)  waiting %.2f ms/frame (%.0f%%)",
+                        mean, mean > 0.0 ? 1000.0 / mean : 0.0, s[149], s[284], s[296], s[299],
+                        over, 100.0 * (double) over / 300.0, wsum / 300.0,
+                        sum > 0.0 ? 100.0 * wsum / sum : 0.0);
+                perf_n = 0;
+            }
+        }
+        perf_prev = perf_now;
+    }
 
     if (g_s.valid_frames <= 5 || (g_s.valid_frames % 300) == 0)
         xr_logf("frame %lu  yaw %+7.2f pitch %+7.2f roll %+7.2f  pos [%+6.3f %+6.3f %+6.3f] m",
