@@ -46,9 +46,8 @@ __declspec(dllexport) HRESULT WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD d
     }
 
     HRESULT hr = DirectInputCreateA_orig(hinst, dwVersion, ppDI, punkOuter);
-    // Put the wheel's centring spring back after the game acquires the device. Acquiring a
-    // force-feedback device switches autocentre off, and this game never sets up effects of its
-    // own, so the wheel would otherwise go slack and the steering feel twitchy.
+    // Watch the devices the game creates, so a wheel can be recognised as a wheel and opened a
+    // second time for the controls the game does not map.
     if (SUCCEEDED(hr) && ppDI != NULL && *ppDI != NULL)
         wheel_autocenter_install(*ppDI);
     return hr;

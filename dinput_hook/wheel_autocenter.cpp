@@ -1,25 +1,37 @@
-// Restore a force-feedback wheel's centring spring while the game runs.
+// Identify the game's DirectInput devices, and read the wheel directly.
 //
-// Out of the game a G923 has firm tension: that is the driver's default autocentre spring. When a
-// DirectInput application acquires the device, DirectInput switches autocentre OFF, because an
-// application that takes a force-feedback device is expected to drive the effects itself. SWE1R was
-// written against Immersion's IFORCE2 and does not drive a modern wheel, so it turns the spring off
-// and never replaces it. The wheel goes slack, and with nothing to damp small movements the
-// steering feels twitchy no matter how it is calibrated.
+// (The file is still named for a centring-spring feature that used to live here. It was
+// removed in v1.2.1 as dead code: see below.)
 //
-// The fix is to put DIPROP_AUTOCENTER back on after the game acquires the device. That needs the
-// device pointer, which only the game sees -- so CreateDevice is intercepted to reach it, and
-// Acquire is intercepted so the property is set at a point where it sticks (setting it before
-// acquisition does not).
+// CreateDevice is intercepted so the mod can see every device the game opens: what type each one
+// is (a wheel says so, and no amount of watching axis values ever could), and the instance GUID
+// needed to open a second handle on the same wheel further down this file.
 //
-// Interception is by vtable slot rather than by wrapping the interfaces. Wrapping means
-// reimplementing every method of IDirectInput and IDirectInputDevice and getting the lifetime
-// right; a slot patch touches two pointers. The trade is that a vtable is shared by every device
-// of the same class, so the Acquire hook also runs for the keyboard and mouse -- harmless, since
-// setting autocentre on a device without force feedback simply returns an error, which is ignored.
+// Interception is by vtable slot rather than by wrapping the interface. Wrapping means
+// reimplementing every method of IDirectInput and getting the lifetime right; a slot patch touches
+// two pointers. There is exactly one IDirectInput object, created once, so there is one vtable and
+// one original to remember.
+//
+// v1.2 also patched Acquire in each DEVICE's vtable, to put DIPROP_AUTOCENTER back after the game
+// acquired a wheel. That is gone as of v1.2.1, because it had never once succeeded: every device
+// in every session logged answered 'not a force-feedback device' (0x800700aa), the G923 included.
+// The centring spring is available in the wheel's own driver software, which is what the README
+// has always recommended.
+//
+// It was briefly suspected of causing a race-end crash, on the theory that keyboard, mouse and
+// joystick are separate classes with separate vtables while only one original was stored. That
+// was measured and is false: a probe against the real dinput.dll with a G923 attached returns
+// vtable 6c2ae050 for all three, so one original was correct and the second patch_slot call took
+// its already-patched early return. The actual crash was a use-after-free in a debug print, in
+// swrObjJdge_delta.cpp. Recorded here because the wrong answer is the more plausible-sounding one
+// and someone will reach for it again.
+//
+// If autocentre is ever attempted again it needs evidence that SetProperty can succeed at all on
+// this game's interface version -- and, if it is ever applied to devices of more than one class,
+// a table of originals keyed by vtable.
 //
 // Everything here fails soft. If any step does not work the original function is still called and
-// the game behaves exactly as it did before; the only consequence is a slack wheel.
+// the game behaves exactly as it did before.
 
 #define DIRECTINPUT_VERSION 0x0700
 
@@ -34,7 +46,6 @@ extern FILE *hook_log;
 }
 
 extern "C" int vr_wheel_enabled(void);
-extern "C" int vr_wheel_autocenter(void);
 
 namespace {
 
@@ -43,14 +54,11 @@ namespace {
 typedef HRESULT(__stdcall *CreateDevice_t)(void *self, const GUID *rguid, void **ppDevice,
                                            void *punkOuter);
 typedef HRESULT(__stdcall *Acquire_t)(void *self);
-typedef HRESULT(__stdcall *SetProperty_t)(void *self, const GUID *rguidProp,
-                                          const DIPROPHEADER *pdiph);
 typedef HRESULT(__stdcall *GetDeviceInfo_t)(void *self, DIDEVICEINSTANCEA *pdidi);
 
 // IDirectInputA vtable: 0 QueryInterface, 1 AddRef, 2 Release, 3 CreateDevice.
 const int kSlotCreateDevice = 3;
-// IDirectInputDeviceA vtable: ... 5 GetProperty, 6 SetProperty, 7 Acquire.
-const int kSlotSetProperty = 6;
+// IDirectInputDeviceA vtable: ... 6 SetProperty, 7 Acquire.
 const int kSlotAcquire = 7;
 const int kSlotGetDeviceInfo = 15;
 
@@ -62,7 +70,6 @@ bool g_haveWheelGuid = false;
 void *g_pDI = NULL;
 
 CreateDevice_t g_origCreateDevice = nullptr;
-Acquire_t g_origAcquire = nullptr;
 
 void logf_once(const char *fmt, ...) {
     if (!hook_log)
@@ -74,8 +81,13 @@ void logf_once(const char *fmt, ...) {
     fflush(hook_log);
 }
 
-// Replace one vtable entry, remembering the original the first time. Returns false and changes
-// nothing if the memory cannot be made writable.
+// Replace one vtable entry, remembering the original. Returns false and changes nothing if the
+// memory cannot be made writable.
+//
+// One original, so ONE vtable. If this is ever called for objects whose classes have distinct
+// vtables, it stores the first class's function and then calls it for all of them. This
+// dinput.dll happens to give keyboard, mouse and joystick a single shared vtable, so that has
+// never bitten -- do not rely on it. It is used only on the single IDirectInput object.
 bool patch_slot(void *obj, int index, void *hook, void **out_orig) {
     if (obj == nullptr)
         return false;
@@ -93,42 +105,6 @@ bool patch_slot(void *obj, int index, void *hook, void **out_orig) {
     vtbl[index] = hook;
     VirtualProtect(&vtbl[index], sizeof(void *), prot, &prot);
     return true;
-}
-
-HRESULT __stdcall Acquire_hook(void *dev) {
-    const HRESULT hr = g_origAcquire ? g_origAcquire(dev) : E_FAIL;
-    if (FAILED(hr) || !vr_wheel_enabled() || !vr_wheel_autocenter())
-        return hr;
-
-    // Autocentre only means anything on a force-feedback device; everything else returns an error
-    // that is deliberately ignored, because this same vtable serves the keyboard and mouse.
-    void **vtbl = *(void ***) dev;
-    SetProperty_t setProperty = (SetProperty_t) vtbl[kSlotSetProperty];
-
-    DIPROPDWORD prop;
-    ZeroMemory(&prop, sizeof(prop));
-    prop.diph.dwSize = sizeof(DIPROPDWORD);
-    prop.diph.dwHeaderSize = sizeof(DIPROPHEADER);
-    prop.diph.dwObj = 0;
-    prop.diph.dwHow = DIPH_DEVICE;
-    prop.dwData = DIPROPAUTOCENTER_ON;
-
-    const HRESULT pr = setProperty(dev, &DIPROP_AUTOCENTER, &prop.diph);
-
-    // One line per device, not per acquire: a game re-acquires on every focus change.
-    static void *logged[8] = {};
-    static int nlogged = 0;
-    bool seen = false;
-    for (int i = 0; i < nlogged; i++)
-        if (logged[i] == dev)
-            seen = true;
-    if (!seen && nlogged < 8) {
-        logged[nlogged++] = dev;
-        logf_once("[wheel] autocenter on device %p: %s (hr=0x%08lx)\n", dev,
-                  SUCCEEDED(pr) ? "ENABLED" : "not a force-feedback device, ignored",
-                  (unsigned long) pr);
-    }
-    return hr;
 }
 
 // A wheel identifies itself. Axis values never could: a pad's left stick is axis 0, the same
@@ -170,10 +146,10 @@ HRESULT __stdcall CreateDevice_hook(void *self, const GUID *rguid, void **ppDevi
                                     void *punkOuter) {
     const HRESULT hr =
         g_origCreateDevice ? g_origCreateDevice(self, rguid, ppDevice, punkOuter) : E_FAIL;
-    if (SUCCEEDED(hr) && ppDevice != nullptr && *ppDevice != nullptr) {
+    // Identify the device, and nothing else. v1.2 also patched each device's Acquire slot here;
+    // see the note at the top of this file for why that is gone.
+    if (SUCCEEDED(hr) && ppDevice != nullptr && *ppDevice != nullptr)
         note_device_type(*ppDevice);
-        patch_slot(*ppDevice, kSlotAcquire, (void *) &Acquire_hook, (void **) &g_origAcquire);
-    }
     return hr;
 }
 
@@ -397,6 +373,6 @@ extern "C" void wheel_autocenter_install(void *pDI) {
     g_pDI = pDI;
     installed = patch_slot(pDI, kSlotCreateDevice, (void *) &CreateDevice_hook,
                            (void **) &g_origCreateDevice);
-    logf_once("[wheel] autocenter hook %s\n",
-              installed ? "installed" : "FAILED to install - wheel will stay slack");
+    logf_once("[wheel] device hook %s\n",
+              installed ? "installed" : "FAILED to install - no wheel support");
 }
