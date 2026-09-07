@@ -307,7 +307,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
             wdp_r = stdControl_aKeyInfos[base + 2] != 0 && !btn_rest[base + 2];
             wdp_d = stdControl_aKeyInfos[base + 3] != 0 && !btn_rest[base + 3];
         }
-        for (int s = 0; rest_ready && vr_wheel_enabled() && s < 8; s++) {
+        for (int s = 0; rest_ready && vr_wheel_enabled() && s < 10; s++) {
             const int bi = vr_wheel_btn_index(s);
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
                 continue;
