@@ -249,7 +249,11 @@ struct VrState {
     // autodetected: a pad's left stick is axis 0 and its buttons share the same indices a
     // wheel uses, so no runtime test can tell them apart. Guessing wrong breaks pad,
     // keyboard and headset users who never asked for wheel support at all.
-    bool wheel_enabled = false;
+    // 0 Auto (on only when a wheel is actually attached), 1 Always on, 2 Off.
+    // Auto works because DirectInput reports device TYPE -- a driving device is not a
+    // gamepad. The earlier attempt watched axis 0 for movement, which a pad's left stick
+    // trips, and that is why it had to become a manual switch at the time.
+    int wheel_mode = 0;
     // Put the wheel's centring spring back while the game runs. DirectInput turns autocentre
     // off when an app acquires a force-feedback device, and this game never replaces it.
     bool wheel_autocenter = true;
@@ -366,7 +370,7 @@ static void vr_settings_load(void) {
     g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
-    g_s.wheel_enabled = vr_ini_get_b("wheel_enabled", g_s.wheel_enabled);
+    g_s.wheel_mode = (int) vr_ini_get_f("wheel_mode", (float) g_s.wheel_mode);
     g_s.wheel_autocenter = vr_ini_get_b("wheel_autocenter", g_s.wheel_autocenter);
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     g_s.wheel_suppress_game_input =
@@ -418,7 +422,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
-    vr_ini_set_b("wheel_enabled", g_s.wheel_enabled);
+    vr_ini_set_f("wheel_mode", (float) g_s.wheel_mode);
     vr_ini_set_b("wheel_autocenter", g_s.wheel_autocenter);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
@@ -1421,13 +1425,17 @@ float vr_flare_size_units(void) {
 }
 
 int vr_wheel_enabled(void) {
-    return g_s.wheel_enabled ? 1 : 0;
+    if (g_s.wheel_mode == 1)
+        return 1;// forced on
+    if (g_s.wheel_mode == 2)
+        return 0;// forced off
+    return vr_wheel_device_present();// auto
 }
 int vr_wheel_autocenter(void) {
     return g_s.wheel_autocenter ? 1 : 0;
 }
 int vr_wheel_steer_axis(void) {
-    return g_s.wheel_enabled ? g_s.wheel_steer_axis : -1;
+    return vr_wheel_enabled() ? g_s.wheel_steer_axis : -1;
 }
 int vr_wheel_suppress_game_input(void) {
     return g_s.wheel_suppress_game_input ? 1 : 0;
@@ -1741,16 +1749,19 @@ void vr_poll_recenter_chord(void);
 // file's settings struct.
 extern "C" void vr_draw_wheel_settings(void) {
     ImGui::SeparatorText("Wheel / joystick steering (experimental)");
-    ImGui::Checkbox("Enable wheel support", &g_s.wheel_enabled);
+    ImGui::Combo("Wheel support", &g_s.wheel_mode,
+                 "Auto (on when a wheel is attached)\0Always on\0Off\0");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Auto asks DirectInput what each device IS, so a wheel switches this\n"
+                          "on and a gamepad does not. Force it on only if your wheel reports\n"
+                          "itself as something other than a driving device.");
+    ImGui::SameLine();
+    ImGui::TextDisabled(vr_wheel_device_present() ? "(wheel detected)" : "(no wheel seen)");
     ImGui::Checkbox("Restore wheel centring spring", &g_s.wheel_autocenter);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The game switches the wheel's autocentre off when it takes the\n"
                           "device and never replaces it, leaving the wheel slack and the\n"
                           "steering twitchy. Takes effect on the next launch.");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Leave OFF unless you are using a wheel. A gamepad shares the\n"
-                          "same axis and button numbers, so wheel support cannot be\n"
-                          "detected automatically and would fight a pad if left on.");
     ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
                        "axis binding. Turn the wheel and watch which axis below moves, then\n"
                        "set that number. -1 is off.");

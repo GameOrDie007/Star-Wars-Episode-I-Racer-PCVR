@@ -172,6 +172,8 @@ void vr_haptic_event(float amplitude, float duration_ms);
 // Draws the wheel / pedal settings. Called from the Input panel.
 void vr_draw_wheel_settings(void);
 int vr_wheel_enabled(void);
+// Non-zero once DirectInput has reported an attached device as a driving device.
+int vr_wheel_device_present(void);
 // Restore the wheel's centring spring, which DirectInput disables on acquisition.
 int vr_wheel_autocenter(void);
 int vr_wheel_steer_axis(void);
