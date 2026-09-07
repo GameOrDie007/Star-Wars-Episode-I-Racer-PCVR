@@ -250,7 +250,11 @@ struct VrState {
     // Put the wheel's centring spring back while the game runs. DirectInput turns autocentre
     // off when an app acquires a force-feedback device, and this game never replaces it.
     bool wheel_autocenter = true;
-    int wheel_steer_axis = -1;
+    // Defaults below are a complete Logitech G923 map, measured on one. Another wheel will
+    // report different axis and button numbers, so they are still settings -- but a G923 user
+    // only has to tick the switch, and anyone else has a working layout to adjust rather than
+    // a blank form to fill in.
+    int wheel_steer_axis = 0;
     // Stop the GAME acting on the joystick itself while we read its axes for steering.
     // With a wheel attached the pedals rest at full deflection, which the game treats as a
     // held input: menus scroll and confirm on their own and the keyboard appears dead.
@@ -259,18 +263,20 @@ struct VrState {
     // they auto-calibrate on their own min/max rather than sharing the steering logic.
     // Which is throttle and which is brake cannot be told apart by watching them move,
     // so both are settings and can be swapped live.
-    int wheel_throttle_axis = -1;
-    int wheel_brake_axis = -1;
+    int wheel_throttle_axis = 2;
+    int wheel_brake_axis = 5;
     float wheel_pedal_threshold = 0.15f;
     // Third pedal. 0 = Slide, 1 = Boost, 2 = Look back.
     int wheel_clutch_axis = -1;
     int wheel_clutch_action = 0;
     // D-pad: the four directions sit in one contiguous block, measured as
     // 272 Left, 273 Up, 274 Right, 275 Down, so one base index covers all four.
-    int wheel_dpad_base = -1;
+    int wheel_dpad_base = 272;// Left, Up, Right, Down at +0..+3
     // Six freely assignable buttons. Action ids below.
-    int wheel_btn_index[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-    int wheel_btn_action[8] = {0, 1, 3, 4, 3, 4, 3, 4};
+    //            L-pad  R-pad    A    B   LB   RB    X    Y    +    -
+    int wheel_btn_index[10] = {261, 260, 256, 257, 263, 262, 258, 259, 265, 264};
+    //          RollL  RollR  Confirm Back Charge Boost LookBk Repair Camera Slide
+    int wheel_btn_action[10] = {8, 9, 3, 4, 7, 0, 2, 5, 6, 1};
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -372,7 +378,7 @@ static void vr_settings_load(void) {
     g_s.wheel_clutch_action =
         (int) vr_ini_get_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     g_s.wheel_dpad_base = (int) vr_ini_get_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 10; i++) {
         char k[40];
         snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
         g_s.wheel_btn_index[i] = (int) vr_ini_get_f(k, (float) g_s.wheel_btn_index[i]);
@@ -419,7 +425,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
     vr_ini_set_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     vr_ini_set_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 10; i++) {
         char k[40];
         snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
         vr_ini_set_f(k, (float) g_s.wheel_btn_index[i]);
@@ -1442,10 +1448,10 @@ int vr_wheel_dpad_base(void) {
     return g_s.wheel_dpad_base;
 }
 int vr_wheel_btn_index(int slot) {
-    return (slot >= 0 && slot < 8) ? g_s.wheel_btn_index[slot] : -1;
+    return (slot >= 0 && slot < 10) ? g_s.wheel_btn_index[slot] : -1;
 }
 int vr_wheel_btn_action(int slot) {
-    return (slot >= 0 && slot < 8) ? g_s.wheel_btn_action[slot] : 0;
+    return (slot >= 0 && slot < 10) ? g_s.wheel_btn_action[slot] : 0;
 }
 // Bumped to ask the input layer to forget its learned wheel and pedal ranges.
 static int g_wheel_recal = 0;
@@ -1852,7 +1858,7 @@ void vr_probe_draw_imgui(void) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The four directions are consecutive from here:\n"
                           "base+0 Left, +1 Up, +2 Right, +3 Down. 272 on a G923.");
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 10; i++) {
         char lbl[32];
         snprintf(lbl, sizeof(lbl), "Button %d index", i + 1);
         ImGui::SliderInt(lbl, &g_s.wheel_btn_index[i], -1, 520);
