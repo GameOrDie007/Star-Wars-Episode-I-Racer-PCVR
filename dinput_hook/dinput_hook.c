@@ -9,6 +9,7 @@
 #include <ddraw.h>
 
 void init_hooks();
+void wheel_autocenter_install(void *pDI);
 void init_renderer_hooks();
 
 extern FILE *hook_log;
@@ -44,5 +45,11 @@ __declspec(dllexport) HRESULT WINAPI DirectInputCreateA(HINSTANCE hinst, DWORD d
         // VirtualProtect(info.lpBaseOfDll, info.SizeOfImage, PAGE_EXECUTE_READWRITE, &old_protect);
     }
 
-    return DirectInputCreateA_orig(hinst, dwVersion, ppDI, punkOuter);
+    HRESULT hr = DirectInputCreateA_orig(hinst, dwVersion, ppDI, punkOuter);
+    // Put the wheel's centring spring back after the game acquires the device. Acquiring a
+    // force-feedback device switches autocentre off, and this game never sets up effects of its
+    // own, so the wheel would otherwise go slack and the steering feel twitchy.
+    if (SUCCEEDED(hr) && ppDI != NULL && *ppDI != NULL)
+        wheel_autocenter_install(*ppDI);
+    return hr;
 }

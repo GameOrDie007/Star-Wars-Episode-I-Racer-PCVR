@@ -247,6 +247,9 @@ struct VrState {
     // wheel uses, so no runtime test can tell them apart. Guessing wrong breaks pad,
     // keyboard and headset users who never asked for wheel support at all.
     bool wheel_enabled = false;
+    // Put the wheel's centring spring back while the game runs. DirectInput turns autocentre
+    // off when an app acquires a force-feedback device, and this game never replaces it.
+    bool wheel_autocenter = true;
     int wheel_steer_axis = -1;
     // Stop the GAME acting on the joystick itself while we read its axes for steering.
     // With a wheel attached the pedals rest at full deflection, which the game treats as a
@@ -355,6 +358,7 @@ static void vr_settings_load(void) {
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     g_s.wheel_enabled = vr_ini_get_b("wheel_enabled", g_s.wheel_enabled);
+    g_s.wheel_autocenter = vr_ini_get_b("wheel_autocenter", g_s.wheel_autocenter);
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     g_s.wheel_suppress_game_input =
         vr_ini_get_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
@@ -406,6 +410,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     vr_ini_set_b("wheel_enabled", g_s.wheel_enabled);
+    vr_ini_set_b("wheel_autocenter", g_s.wheel_autocenter);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
     vr_ini_set_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
@@ -1409,6 +1414,9 @@ float vr_flare_size_units(void) {
 int vr_wheel_enabled(void) {
     return g_s.wheel_enabled ? 1 : 0;
 }
+int vr_wheel_autocenter(void) {
+    return g_s.wheel_autocenter ? 1 : 0;
+}
 int vr_wheel_steer_axis(void) {
     return g_s.wheel_enabled ? g_s.wheel_steer_axis : -1;
 }
@@ -1808,6 +1816,11 @@ void vr_probe_draw_imgui(void) {
 
     ImGui::SeparatorText("Wheel / joystick steering (experimental)");
     ImGui::Checkbox("Enable wheel support", &g_s.wheel_enabled);
+    ImGui::Checkbox("Restore wheel centring spring", &g_s.wheel_autocenter);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The game switches the wheel's autocentre off when it takes the\n"
+                          "device and never replaces it, leaving the wheel slack and the\n"
+                          "steering twitchy. Takes effect on the next launch.");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Leave OFF unless you are using a wheel. A gamepad shares the\n"
                           "same axis and button numbers, so wheel support cannot be\n"
