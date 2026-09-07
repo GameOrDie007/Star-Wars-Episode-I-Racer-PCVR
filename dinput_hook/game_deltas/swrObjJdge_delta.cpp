@@ -260,6 +260,50 @@ void stdControl_ReadControls_boostfix_delta(void) {
         swrConfig_joystick_enabled = 0;
     }
 
+    // Wheel pedals -> the same scancodes the VR triggers use. Deliberately outside the
+    // vr_input_available() guard: a wheel works flat as well as in a headset.
+    {
+        static int p_lo[15];
+        static int p_hi[15];
+        static int p_init = 0;
+        if (!p_init) {
+            p_init = 1;
+            for (int i = 0; i < 15; i++) {
+                p_lo[i] = 0x7fffffff;
+                p_hi[i] = -0x7fffffff;
+            }
+        }
+        const float thr = vr_wheel_pedal_threshold();
+        const int pedals[2] = {vr_wheel_throttle_axis(), vr_wheel_brake_axis()};
+        const int keys[2] = {VRK_ACCEL, VRK_BRAKE};
+        for (int k = 0; k < 2; k++) {
+            const int a = pedals[k];
+            if (a < 0 || a >= 15)
+                continue;
+            const int raw = stdControl_aAxisPos[a];
+            if (raw < p_lo[a])
+                p_lo[a] = raw;
+            if (raw > p_hi[a])
+                p_hi[a] = raw;
+            const int span = p_hi[a] - p_lo[a];
+            if (span < 4000)
+                continue;// not pressed far enough yet to know the travel
+            // Rest is the HIGH end and pressing falls towards the low end, so invert.
+            const float t = (float) (p_hi[a] - raw) / (float) span;
+            vr_hold_key(keys[k], t > thr);
+            static int pedal_logged[2] = {0, 0};
+            if (!pedal_logged[k] && t > thr) {
+                pedal_logged[k] = 1;
+                fprintf(hook_log,
+                        "[wheel] pedal %s axis %d LIVE: raw=%d lo=%d hi=%d -> %.2f"
+                        "  (game throttle=%.3f thrust=%.3f)\n",
+                        k == 0 ? "THROTTLE" : "BRAKE", a, raw, p_lo[a], p_hi[a], t,
+                        swrRace_ThrottleInput, swrRace_ThrustInput);
+                fflush(hook_log);
+            }
+        }
+    }
+
     // Axis activity scan. Logs each DirectInput axis the first time it moves, once per
     // axis, so one session identifies which slot a wheel or pedal set lands on. Runs in
     // menus as well as races, and is independent of any wheel setting -- a diagnostic

@@ -174,6 +174,10 @@ float vr_wheel_deadzone(void);
 int vr_wheel_invert(void);
 // Non-zero to stop the GAME acting on the joystick while we still read its axes.
 int vr_wheel_suppress_game_input(void);
+// Pedal axes: unipolar, resting at maximum and falling as pressed. -1 disables.
+int vr_wheel_throttle_axis(void);
+int vr_wheel_brake_axis(void);
+float vr_wheel_pedal_threshold(void);
 // One raw DirectInput axis (0..14), for the axis picker. Returns 0 out of range.
 int vr_raw_axis(int i);
 
