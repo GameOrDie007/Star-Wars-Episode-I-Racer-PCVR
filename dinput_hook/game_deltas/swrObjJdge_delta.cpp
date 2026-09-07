@@ -247,17 +247,48 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // pedals rest at 65535, which it reads as a held input. Clear the flags its downstream
     // logic consults, AFTER the original has run -- the original is what fills
     // stdControl_aAxisPos, which the wheel steering reads, so this must not come first.
-    if (vr_wheel_steer_axis() >= 0 && vr_wheel_suppress_game_input()) {
+    {
+        // "Is a wheel plugged in" cannot be answered by a setting -- the setting outlives the
+        // hardware. Wait until the configured steer axis actually moves. With no wheel the axis
+        // never moves, nothing is suppressed, and a pad or keyboard behaves exactly as it did
+        // before any wheel support existed.
+        static int steer_rest = 0;
+        static int steer_rest_ok = 0;
+        static int settle = 0;
+        static int wheel_live = 0;
         static int suppress_logged = 0;
-        if (!suppress_logged) {
-            suppress_logged = 1;
-            fprintf(hook_log,
-                    "[wheel] suppressing game joystick input (was detected=%d enabled=%d)\n",
-                    joystick_detected, swrConfig_joystick_enabled);
-            fflush(hook_log);
+
+        const int sa = vr_wheel_steer_axis();
+        if (sa >= 0 && sa < 15) {
+            if (!steer_rest_ok) {
+                // Same reason as the button rest capture: the arrays are not populated on the
+                // first frames, and a rest value of zero would make any real reading look like
+                // movement.
+                if (++settle >= 30) {
+                    steer_rest_ok = 1;
+                    steer_rest = stdControl_aAxisPos[sa];
+                }
+            } else if (!wheel_live) {
+                int d = stdControl_aAxisPos[sa] - steer_rest;
+                if (d < 0)
+                    d = -d;
+                if (d > 1000)
+                    wheel_live = 1;
+            }
         }
-        joystick_detected = 0;
-        swrConfig_joystick_enabled = 0;
+
+        if (wheel_live && vr_wheel_suppress_game_input()) {
+            if (!suppress_logged) {
+                suppress_logged = 1;
+                fprintf(hook_log,
+                        "[wheel] wheel detected on axis %d - suppressing game joystick input"
+                        " (was detected=%d enabled=%d)\n",
+                        sa, joystick_detected, swrConfig_joystick_enabled);
+                fflush(hook_log);
+            }
+            joystick_detected = 0;
+            swrConfig_joystick_enabled = 0;
+        }
     }
 
     // Wheel D-pad and buttons. Read here, before the VR block, so their state can be
