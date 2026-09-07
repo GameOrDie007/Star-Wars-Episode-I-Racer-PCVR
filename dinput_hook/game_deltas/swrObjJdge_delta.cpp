@@ -1721,7 +1721,11 @@ void swrObjJdge_F0_delta(swrObjJdge *jdge) {
             trace_left = 400;
         if (trace_left > 0 && (state >= 2 || last_traced >= 2)) {
             trace_left--;
-            if (state != last_traced || state >= 3) {
+            // State changes only. The per-frame version found the answer (the mod's own skipStage
+            // advancing the post-race stages on a genuine accept press, which turned out to be
+            // correct behaviour) and cost 691 lines a session. Six lines a race is worth keeping:
+            // the original pop-out report was real and has never been reproduced.
+            if (state != last_traced) {
                 fprintf(hook_log,
                         "[postrace] state=%d flag=0x%08x acceptEdge=%d bitset0=0x%08x "
                         "bitset1=0x%08x skipEdge=%d orbitFrames=%d boost=%d\n",

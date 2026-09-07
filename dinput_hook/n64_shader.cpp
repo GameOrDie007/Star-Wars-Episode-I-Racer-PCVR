@@ -3,6 +3,7 @@
 //
 
 #include "n64_shader.h"
+#include <chrono>
 #include <format>
 #include <glad/glad.h>
 #include <map>
@@ -283,8 +284,17 @@ get_or_compile_color_combine_shader(ImGuiState &state,
     fprintf(hook_log, "Generating n64 shader with defines:\n%s", defines.c_str());
     fflush(hook_log);
 
-    std::string vertex_shader_source_s = readFileAsString("./assets/shaders/n64_shader.vert");
-    std::string fragment_shader_source_s = readFileAsString("./assets/shaders/n64_shader.frag");
+    // A compile lands on whatever frame first needs the material, which mid-race is a visible
+    // hitch. Timed so it is known rather than assumed -- the alternative is guessing at a
+    // stall we can measure directly.
+    const auto t_begin = std::chrono::steady_clock::now();
+
+    // Read once. These files cannot change during a run, and re-reading both on every compile
+    // put two synchronous file reads inside the hitch for nothing.
+    static const std::string vertex_shader_source_s =
+        readFileAsString("./assets/shaders/n64_shader.vert");
+    static const std::string fragment_shader_source_s =
+        readFileAsString("./assets/shaders/n64_shader.frag");
     const char *vertex_shader_source = vertex_shader_source_s.c_str();
     const char *fragment_shader_source = fragment_shader_source_s.c_str();
 
@@ -309,6 +319,13 @@ get_or_compile_color_combine_shader(ImGuiState &state,
             std::abort();
         }
     }
+
+    static int compile_count = 0;
+    const double compile_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_begin)
+            .count();
+    fprintf(hook_log, "n64 shader #%d compiled in %.1f ms\n", ++compile_count, compile_ms);
+    fflush(hook_log);
 
     return shader_map
         .insert_or_assign(combiners, make_color_combine_shader(program_opt.value()))
