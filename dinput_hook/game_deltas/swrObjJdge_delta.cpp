@@ -267,7 +267,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // callers for one scancode would fight -- vr_hold_key keeps a single was[] per key, so
     // whichever ran second would clear the other's press the same frame.
     bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
-    bool wbtn[8] = {};// indexed by action id
+    bool wbtn[10] = {};// indexed by action id
     bool wped[3] = {};// throttle, brake, clutch -- OR-ed in below, never injected directly
     {
         // A control that rests in the DOWN state would otherwise be held forever. The pedals
@@ -312,7 +312,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
                 continue;
             int act = vr_wheel_btn_action(s);
-            if (act < 0 || act > 7)
+            if (act < 0 || act > 9)
                 act = 0;
             wbtn[act] = true;
         }
@@ -594,8 +594,8 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // Repair is right-stick-down. It shares that direction with pull-up, which is fine:
         // holding repair while climbing is a legitimate thing to want mid-race.
         vr_hold_key(VRK_REPAIR, vr_input_repair() != 0 || wbtn[5]);
-        vr_hold_key(VRK_ROLLL, vr_input_roll_left() != 0);
-        vr_hold_key(VRK_ROLLR, vr_input_roll_right() != 0);
+        vr_hold_key(VRK_ROLLL, vr_input_roll_left() != 0 || wbtn[8]);
+        vr_hold_key(VRK_ROLLR, vr_input_roll_right() != 0 || wbtn[9]);
         // Menu confirm/cancel ride the same buttons; the front end uses the event path below,
         // and these scancodes mean nothing to it, so the two cannot collide.
         vr_hold_key(VRK_ENTER, vr_input_boost() != 0 || wbtn[3]);
@@ -655,6 +655,8 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_ESC, wbtn[4]);
         vr_hold_key(VRK_REPAIR, wbtn[5]);
         vr_hold_key(VRK_VIEW, wbtn[6]);
+        vr_hold_key(VRK_ROLLL, wbtn[8]);
+        vr_hold_key(VRK_ROLLR, wbtn[9]);
         vr_menu_key(VRVK_UP, wdp_u, 0);
         vr_menu_key(VRVK_DOWN, wdp_d, 1);
         vr_menu_key(VRVK_LEFT, wdp_l, 2);

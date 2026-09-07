@@ -1859,7 +1859,7 @@ void vr_probe_draw_imgui(void) {
         snprintf(lbl, sizeof(lbl), "Button %d does", i + 1);
         ImGui::Combo(lbl, &g_s.wheel_btn_action[i],
                      "Boost\0Slide\0Look back\0Confirm\0Back / pause\0Repair\0Camera\0"
-                     "Charge boost (hold)\0");
+                     "Charge boost (hold)\0Roll left\0Roll right\0");
         if (i == 0 && ImGui::IsItemHovered())
             ImGui::SetTooltip("Charge boost is the game's hold-up-to-charge input. Put it on a\n"
                               "button you can hold while steering, then fire with Boost. It\n"
