@@ -26,6 +26,7 @@
 #include <windows.h>
 #include <dinput.h>
 #include <stdarg.h>
+#include <stddef.h>// offsetof, for the custom data format
 #include <stdio.h>
 
 extern "C" {
@@ -53,8 +54,12 @@ const int kSlotSetProperty = 6;
 const int kSlotAcquire = 7;
 const int kSlotGetDeviceInfo = 15;
 
-// Set once a device identifying itself as a wheel has been created.
+// Set once a device identifying itself as a wheel has been created, together with the
+// identity needed to open our own handle on the same hardware later.
 bool g_wheelDevicePresent = false;
+GUID g_wheelGuid;
+bool g_haveWheelGuid = false;
+void *g_pDI = NULL;
 
 CreateDevice_t g_origCreateDevice = nullptr;
 Acquire_t g_origAcquire = nullptr;
@@ -154,6 +159,8 @@ void note_device_type(void *dev) {
         (type == 0x14) || (type == DIDEVTYPE_JOYSTICK && subtype == DIDEVTYPEJOYSTICK_WHEEL);
     if (isWheel && !g_wheelDevicePresent) {
         g_wheelDevicePresent = true;
+        g_wheelGuid = info.guidInstance;
+        g_haveWheelGuid = true;
         logf_once("[wheel] driving device detected: '%s' (devType=0x%08lx)\n",
                   info.tszProductName, (unsigned long) info.dwDevType);
     }
@@ -170,6 +177,192 @@ HRESULT __stdcall CreateDevice_hook(void *self, const GUID *rguid, void **ppDevi
     return hr;
 }
 
+// ---------------------------------------------------------------------------
+// Direct device read
+//
+// The game maps only 16 buttons plus a hat, and three axes. This wheel reports 23
+// buttons and four axes, so Start, Back and the clutch never reach any array the
+// mod can read. Opening our own device on the same hardware sidesteps the game's
+// input layer entirely.
+//
+// Non-exclusive and background, so it coexists with the game's own acquisition
+// rather than competing for the device.
+// ---------------------------------------------------------------------------
+
+struct WheelState {
+    LONG axis[8];
+    DWORD pov[4];
+    BYTE button[32];
+};
+
+// A data format with NULL object GUIDs and ANYINSTANCE: DirectInput fills these in
+// device order, which is exactly what is wanted here -- every axis and button it
+// has, whatever it chooses to call them. Writing into OUR struct, so there is no
+// game buffer to overrun.
+DIOBJECTDATAFORMAT g_objFmt[8 + 4 + 32];
+DIDATAFORMAT g_fmt;
+bool g_fmtReady = false;
+
+void build_format() {
+    if (g_fmtReady)
+        return;
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        g_objFmt[n].pguid = NULL;
+        g_objFmt[n].dwOfs = (DWORD) (i * sizeof(LONG));
+        g_objFmt[n].dwType = DIDFT_AXIS | DIDFT_ANYINSTANCE;
+        g_objFmt[n].dwFlags = 0;
+        n++;
+    }
+    for (int i = 0; i < 4; i++) {
+        g_objFmt[n].pguid = NULL;
+        g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, pov) + i * sizeof(DWORD));
+        g_objFmt[n].dwType = DIDFT_POV | DIDFT_ANYINSTANCE;
+        g_objFmt[n].dwFlags = 0;
+        n++;
+    }
+    for (int i = 0; i < 32; i++) {
+        g_objFmt[n].pguid = NULL;
+        g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, button) + i);
+        g_objFmt[n].dwType = DIDFT_BUTTON | DIDFT_ANYINSTANCE;
+        g_objFmt[n].dwFlags = 0;
+        n++;
+    }
+    g_fmt.dwSize = sizeof(DIDATAFORMAT);
+    g_fmt.dwObjSize = sizeof(DIOBJECTDATAFORMAT);
+    g_fmt.dwFlags = DIDF_ABSAXIS;
+    g_fmt.dwDataSize = sizeof(WheelState);
+    g_fmt.dwNumObjs = (DWORD) n;
+    g_fmt.rgodf = g_objFmt;
+    g_fmtReady = true;
+}
+
+typedef HRESULT(__stdcall *QueryInterface_t)(void *, const GUID *, void **);
+typedef HRESULT(__stdcall *SetDataFormat_t)(void *, const DIDATAFORMAT *);
+typedef HRESULT(__stdcall *SetCoopLevel_t)(void *, HWND, DWORD);
+typedef HRESULT(__stdcall *GetDeviceState_t)(void *, DWORD, void *);
+typedef HRESULT(__stdcall *Poll_t)(void *);
+
+// Counted from the header rather than remembered: QueryInterface 0, GetDeviceState 9,
+// SetDataFormat 11, SetCooperativeLevel 13, and Poll 25 on IDirectInputDevice2.
+const int kSlotQueryInterface = 0;
+const int kSlotGetDeviceState = 9;
+const int kSlotSetDataFormat = 11;
+const int kSlotSetCoopLevel = 13;
+const int kSlotPoll = 25;
+
+void *g_directDev = NULL;// IDirectInputDevice2A once QueryInterface succeeds
+bool g_directTried = false;
+bool g_directOk = false;
+WheelState g_state;
+
+void direct_try_open() {
+    if (g_directTried || !g_haveWheelGuid || g_pDI == NULL || g_origCreateDevice == NULL)
+        return;
+
+    // A window is needed for SetCooperativeLevel, and there is none during
+    // DirectInputCreate, so opening is deferred until one exists.
+    HWND hwnd = GetForegroundWindow();
+    if (hwnd == NULL)
+        return;
+
+    g_directTried = true;
+    build_format();
+
+    void *dev = NULL;
+    HRESULT hr = g_origCreateDevice(g_pDI, &g_wheelGuid, &dev, NULL);
+    if (FAILED(hr) || dev == NULL) {
+        logf_once("[wheel] direct: CreateDevice failed (0x%08lx)\n", (unsigned long) hr);
+        return;
+    }
+
+    // The pollable interface. Without it the Poll slot cannot be called safely, since a
+    // base IDirectInputDevice vtable is shorter and slot 25 would be somebody else's code.
+    void **vtbl = *(void ***) dev;
+    QueryInterface_t qi = (QueryInterface_t) vtbl[kSlotQueryInterface];
+    static const GUID kIID_IDirectInputDevice2A = {
+        0x5944E682, 0xC92E, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}};
+    void *dev2 = NULL;
+    if (FAILED(qi(dev, &kIID_IDirectInputDevice2A, &dev2)) || dev2 == NULL) {
+        logf_once("[wheel] direct: no IDirectInputDevice2 - cannot poll\n");
+        return;
+    }
+
+    void **v2 = *(void ***) dev2;
+    SetDataFormat_t setFmt = (SetDataFormat_t) v2[kSlotSetDataFormat];
+    SetCoopLevel_t setCoop = (SetCoopLevel_t) v2[kSlotSetCoopLevel];
+    Acquire_t acquire = (Acquire_t) v2[kSlotAcquire];
+
+    hr = setFmt(dev2, &g_fmt);
+    if (FAILED(hr)) {
+        logf_once("[wheel] direct: SetDataFormat failed (0x%08lx)\n", (unsigned long) hr);
+        return;
+    }
+    // Background and non-exclusive: the game owns the device, this only observes it.
+    hr = setCoop(dev2, hwnd, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE);
+    if (FAILED(hr)) {
+        logf_once("[wheel] direct: SetCooperativeLevel failed (0x%08lx)\n", (unsigned long) hr);
+        return;
+    }
+    hr = acquire(dev2);
+    if (FAILED(hr)) {
+        logf_once("[wheel] direct: Acquire failed (0x%08lx) - will retry\n", (unsigned long) hr);
+        g_directTried = false;// transient; the game may not have finished starting up
+        return;
+    }
+
+    g_directDev = dev2;
+    g_directOk = true;
+    logf_once("[wheel] direct read ACTIVE - all buttons and axes now readable\n");
+}
+
+}// namespace
+
+extern "C" void vr_wheel_direct_poll(void) {
+    if (!g_directOk) {
+        direct_try_open();
+        return;
+    }
+    void **v2 = *(void ***) g_directDev;
+    Poll_t poll = (Poll_t) v2[kSlotPoll];
+    GetDeviceState_t getState = (GetDeviceState_t) v2[kSlotGetDeviceState];
+
+    poll(g_directDev);
+    HRESULT hr = getState(g_directDev, sizeof(WheelState), &g_state);
+    if (FAILED(hr)) {
+        // Lost to a focus change; re-acquire and try again next frame.
+        Acquire_t acquire = (Acquire_t) v2[kSlotAcquire];
+        acquire(g_directDev);
+    }
+}
+
+extern "C" int vr_wheel_direct_ok(void) {
+    return g_directOk ? 1 : 0;
+}
+
+// Button 0..31, in the device's own order rather than the game's truncated map.
+extern "C" int vr_wheel_direct_button(int i) {
+    if (!g_directOk || i < 0 || i >= 32)
+        return 0;
+    return (g_state.button[i] & 0x80) ? 1 : 0;
+}
+
+// Axis 0..7, raw. The clutch is here even though the game only reads three axes.
+extern "C" int vr_wheel_direct_axis(int i) {
+    if (!g_directOk || i < 0 || i >= 8)
+        return 0;
+    return (int) g_state.axis[i];
+}
+
+// POV 0..3 in hundredths of a degree, or -1 when centred.
+extern "C" int vr_wheel_direct_pov(int i) {
+    if (!g_directOk || i < 0 || i >= 4)
+        return -1;
+    const DWORD v = g_state.pov[i];
+    return (LOWORD(v) == 0xFFFF) ? -1 : (int) v;
+}
+
+namespace {
 }// namespace
 
 // Called from the dinput proxy once the real DirectInput object exists.
@@ -181,6 +374,7 @@ extern "C" void wheel_autocenter_install(void *pDI) {
     static bool installed = false;
     if (installed || pDI == nullptr)
         return;
+    g_pDI = pDI;
     installed = patch_slot(pDI, kSlotCreateDevice, (void *) &CreateDevice_hook,
                            (void **) &g_origCreateDevice);
     logf_once("[wheel] autocenter hook %s\n",

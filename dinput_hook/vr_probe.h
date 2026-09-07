@@ -174,6 +174,16 @@ void vr_draw_wheel_settings(void);
 int vr_wheel_enabled(void);
 // Non-zero once DirectInput has reported an attached device as a driving device.
 int vr_wheel_device_present(void);
+
+// Direct read of the wheel, bypassing the game's input layer. The game maps only 16
+// buttons plus a hat and three axes; a wheel reporting more loses the rest before any of
+// this code can see it. Exposed at indices the game's own numbering cannot collide with:
+// buttons 400+n, axes 100+n.
+void vr_wheel_direct_poll(void);
+int vr_wheel_direct_ok(void);
+int vr_wheel_direct_button(int i);// 0..31
+int vr_wheel_direct_axis(int i);  // 0..7, raw
+int vr_wheel_direct_pov(int i);   // 0..3, hundredths of a degree, -1 centred
 // Restore the wheel's centring spring, which DirectInput disables on acquisition.
 int vr_wheel_autocenter(void);
 int vr_wheel_steer_axis(void);
