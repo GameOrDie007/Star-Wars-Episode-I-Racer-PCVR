@@ -17,6 +17,7 @@ extern "C" {
 #include <Swr/swrWeather.h>     // swrWeather_ResetParticles address
 #include <Platform/stdControl.h>// stdControl_ReadControls_ADDR (boost-start Enter suppression)
 #include <globals.h>
+#include "swrGamepadNav_delta.h"// swrGamepadNav_GetDiagState (XInput axis scan)
 
 extern FILE* hook_log;
 // Captured in swrRace_delta.cpp from the collision hook, which already runs per physics
@@ -267,12 +268,53 @@ void stdControl_ReadControls_boostfix_delta(void) {
             if (mag > 3000) {
                 axis_logged[i] = 1;
                 fprintf(hook_log,
-                        "[axis] axis %d MOVED: rest=%d now=%d delta=%d\n",
+                        "[axis] DirectInput axis %d MOVED: rest=%d now=%d delta=%d\n",
                         i, axis_rest[i], stdControl_aAxisPos[i], d);
                 fflush(hook_log);
             }
         }
     }
+
+#if ENABLE_GAMEPAD_NAV
+    // XInput side. The Xbox-variant G923 has no DirectInput wheel mode, so its rotation and
+    // pedals may only ever appear here -- as a gamepad's left stick and triggers.
+    {
+        GamepadDiagState gs;
+        if (swrGamepadNav_GetDiagState(&gs) && gs.padIndex >= 0) {
+            static int xi_rest_ok = 0;
+            static int xi_rest[6];
+            static int xi_logged[6];
+            const int now[6] = {gs.thumbLX,      gs.thumbLY,       gs.thumbRX,
+                                gs.thumbRY,      gs.leftTrigger,   gs.rightTrigger};
+            static const char *xi_name[6] = {"thumbLX (wheel?)", "thumbLY", "thumbRX",
+                                             "thumbRY", "leftTrigger (brake?)",
+                                             "rightTrigger (throttle?)"};
+            if (!xi_rest_ok) {
+                xi_rest_ok = 1;
+                for (int i = 0; i < 6; i++) {
+                    xi_rest[i] = now[i];
+                    xi_logged[i] = 0;
+                }
+                fprintf(hook_log, "[axis] XInput pad %d present - scanning\n", gs.padIndex);
+                fflush(hook_log);
+            }
+            for (int i = 0; i < 6; i++) {
+                if (xi_logged[i])
+                    continue;
+                const int d = now[i] - xi_rest[i];
+                const int mag = d < 0 ? -d : d;
+                // Triggers are 0..255, sticks -32768..32767, so scale the threshold.
+                const int thresh = (i >= 4) ? 40 : 6000;
+                if (mag > thresh) {
+                    xi_logged[i] = 1;
+                    fprintf(hook_log, "[axis] XInput %s MOVED: rest=%d now=%d delta=%d\n",
+                            xi_name[i], xi_rest[i], now[i], d);
+                    fflush(hook_log);
+                }
+            }
+        }
+    }
+#endif
 
 
     // Fold the Quest controllers in on top of the keyboard, never replacing it: the arrays
