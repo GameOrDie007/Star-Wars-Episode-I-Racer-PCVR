@@ -355,19 +355,39 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
             // observed extremes instead, so one turn lock to lock calibrates any device.
             static int lo = 0x7fffffff;
             static int hi = -0x7fffffff;
+            static int centre = 0;
+            static int have_centre = 0;
             static int cal_logged = 0;
+            static int seen_recal = -1;
+
+            const int recal = vr_wheel_recal_generation();
+            if (recal != seen_recal) {
+                seen_recal = recal;
+                lo = 0x7fffffff;
+                hi = -0x7fffffff;
+                have_centre = 0;
+                cal_logged = 0;
+            }
+            // Centre is the RESTING value, captured once. Using the midpoint of min and max
+            // instead put the zero point 3925 counts out on a real session -- nearly the whole
+            // half range -- because the wheel had been turned further one way than the other.
+            // The wheel then read near full lock while sitting straight.
+            if (!have_centre) {
+                have_centre = 1;
+                centre = raw;
+            }
             if (raw < lo)
                 lo = raw;
             if (raw > hi)
                 hi = raw;
 
             int half = vr_wheel_range();// manual override, in raw counts either side of centre
-            int centre;
-            if (half > 0) {
-                centre = (lo + hi) / 2;
-            } else {
-                centre = (lo + hi) / 2;
-                half = (hi - lo) / 2;
+            if (half <= 0) {
+                // Widest excursion FROM the resting centre, so turning further one way widens
+                // the range without dragging the zero point with it.
+                const int dl = centre - lo;
+                const int dh = hi - centre;
+                half = dl > dh ? dl : dh;
             }
             // Until the wheel has been moved enough for the span to mean something, steer
             // nothing. Guessing from a half-turn is worse than leaving the pad in charge.
@@ -379,6 +399,7 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
                     fflush(hook_log);
                 }
                 float w = (float) (raw - centre) / (float) half;
+                w *= vr_wheel_sensitivity();
                 if (w > 1.0f)
                     w = 1.0f;
                 else if (w < -1.0f)
