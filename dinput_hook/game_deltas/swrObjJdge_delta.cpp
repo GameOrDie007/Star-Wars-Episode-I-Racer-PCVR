@@ -321,6 +321,34 @@ void stdControl_ReadControls_boostfix_delta(void) {
         }
     }
 
+    // Button scan. aKeyInfos is int[528] and keyboard scancodes stop at 255, so 256..527
+    // are the other devices -- joystick buttons and, usually, the POV hat as separate
+    // directions. One line per index, the first time it goes down.
+    {
+        static int btn_logged[528];
+        static int btn_init = 0;
+        static int btn_count = 0;
+        if (!btn_init) {
+            btn_init = 1;
+            for (int i = 0; i < 528; i++)
+                btn_logged[i] = 0;
+        }
+        // Cap it: a stuck control would otherwise fill the log with one line per index.
+        if (btn_count < 24) {
+            for (int i = 256; i < 528; i++) {
+                if (btn_logged[i] || stdControl_aKeyInfos[i] == 0)
+                    continue;
+                btn_logged[i] = 1;
+                btn_count++;
+                fprintf(hook_log, "[button] index %d DOWN (value=%d)\n", i,
+                        stdControl_aKeyInfos[i]);
+                fflush(hook_log);
+                if (btn_count >= 24)
+                    break;
+            }
+        }
+    }
+
     // Axis activity scan. Logs each DirectInput axis the first time it moves, once per
     // axis, so one session identifies which slot a wheel or pedal set lands on. Runs in
     // menus as well as races, and is independent of any wheel setting -- a diagnostic
