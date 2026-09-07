@@ -331,7 +331,19 @@ void stdControl_ReadControls_boostfix_delta(void) {
         }
         for (int s = 0; rest_ready && vr_wheel_enabled() && s < 12; s++) {
             const int bi = vr_wheel_btn_index(s);
-            if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
+            if (bi < 0)
+                continue;
+            bool down;
+            if (bi >= 400) {
+                // Direct read: the device's own button order, including the ones the
+                // game's 16-slot map never receives.
+                down = vr_wheel_direct_button(bi - 400) != 0;
+            } else {
+                if (bi >= 528 || btn_rest[bi])
+                    continue;
+                down = stdControl_aKeyInfos[bi] != 0;
+            }
+            if (!down)
                 continue;
             int act = vr_wheel_btn_action(s);
             if (act < 0 || act > 10)
@@ -369,9 +381,20 @@ void stdControl_ReadControls_boostfix_delta(void) {
                                vr_wheel_clutch_axis()};
         for (int k = 0; k < 3; k++) {
             const int a = pedals[k];
-            if (a < 0 || a >= 15)
+            if (a < 0)
                 continue;
-            const int raw = stdControl_aAxisPos[a];
+            // 100+n reads the device directly, which is the only way to reach an axis the
+            // game does not map -- the clutch on a three-axis configuration, for one.
+            int raw;
+            if (a >= 100) {
+                if (!vr_wheel_direct_ok())
+                    continue;
+                raw = vr_wheel_direct_axis(a - 100);
+            } else {
+                if (a >= 15)
+                    continue;
+                raw = stdControl_aAxisPos[a];
+            }
             if (raw < p_lo[a])
                 p_lo[a] = raw;
             if (raw > p_hi[a])
@@ -397,6 +420,51 @@ void stdControl_ReadControls_boostfix_delta(void) {
                         pedal_name[k], a, raw, p_lo[a], p_hi[a], t,
                         swrRace_ThrottleInput, swrRace_ThrustInput);
                 fflush(hook_log);
+            }
+        }
+    }
+
+    // Direct device read: poll first so everything below sees this frame's values.
+    vr_wheel_direct_poll();
+    if (vr_wheel_direct_ok()) {
+        static int d_btn[32];
+        static int d_axis_rest[8];
+        static int d_init = 0;
+        static int d_settle = 0;
+        if (!d_init) {
+            if (++d_settle >= 30) {
+                d_init = 1;
+                for (int i = 0; i < 32; i++)
+                    d_btn[i] = 0;
+                for (int i = 0; i < 8; i++)
+                    d_axis_rest[i] = vr_wheel_direct_axis(i);
+                fprintf(hook_log, "[direct] reading the wheel directly -"
+                                  " buttons appear as 400+n, axes as 100+n\n");
+                fflush(hook_log);
+            }
+        } else {
+            for (int i = 0; i < 32; i++) {
+                if (d_btn[i] || !vr_wheel_direct_button(i))
+                    continue;
+                d_btn[i] = 1;
+                fprintf(hook_log, "[direct] button %d DOWN  (use index %d)\n", i, 400 + i);
+                fflush(hook_log);
+            }
+            static int d_axis_logged[8];
+            for (int i = 0; i < 8; i++) {
+                if (d_axis_logged[i])
+                    continue;
+                const int v = vr_wheel_direct_axis(i);
+                int delta = v - d_axis_rest[i];
+                if (delta < 0)
+                    delta = -delta;
+                if (delta > 3000) {
+                    d_axis_logged[i] = 1;
+                    fprintf(hook_log,
+                            "[direct] axis %d MOVED: rest=%d now=%d  (use axis %d)\n", i,
+                            d_axis_rest[i], v, 100 + i);
+                    fflush(hook_log);
+                }
             }
         }
     }
