@@ -280,10 +280,13 @@ struct VrState {
     // 272 Left, 273 Up, 274 Right, 275 Down, so one base index covers all four.
     int wheel_dpad_base = 272;// Left, Up, Right, Down at +0..+3
     // Six freely assignable buttons. Action ids below.
-    //            L-pad  R-pad    A    B   LB   RB    X    Y    +    -
-    int wheel_btn_index[10] = {261, 260, 256, 257, 263, 262, 258, 259, 265, 264};
-    //          RollL  RollR  Confirm Back Charge Boost LookBk Repair Camera Slide
-    int wheel_btn_action[10] = {8, 9, 3, 4, 7, 0, 2, 5, 6, 1};
+    //            L-pad  R-pad    A    B   LB   RB    X    Y    +    -  spare spare
+    int wheel_btn_index[12] = {261, 260, 256, 257, 263, 262, 258, 259, 265, 264, -1, -1};
+    // A is Boost+Confirm, the same double duty A has on a gamepad: the two never collide,
+    // because you are either in a menu or racing. The two spares are for Start and Back,
+    // whose indices this wheel has not yet reported.
+    //                          RollL RollR B+C Back Charge Boost LookBk Repair Cam Slide
+    int wheel_btn_action[12] = {8, 9, 10, 4, 7, 0, 2, 5, 6, 1, 4, 6};
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -385,7 +388,7 @@ static void vr_settings_load(void) {
     g_s.wheel_clutch_action =
         (int) vr_ini_get_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     g_s.wheel_dpad_base = (int) vr_ini_get_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 12; i++) {
         char k[40];
         snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
         g_s.wheel_btn_index[i] = (int) vr_ini_get_f(k, (float) g_s.wheel_btn_index[i]);
@@ -432,7 +435,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
     vr_ini_set_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
     vr_ini_set_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 12; i++) {
         char k[40];
         snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
         vr_ini_set_f(k, (float) g_s.wheel_btn_index[i]);
@@ -1459,10 +1462,10 @@ int vr_wheel_dpad_base(void) {
     return g_s.wheel_dpad_base;
 }
 int vr_wheel_btn_index(int slot) {
-    return (slot >= 0 && slot < 10) ? g_s.wheel_btn_index[slot] : -1;
+    return (slot >= 0 && slot < 12) ? g_s.wheel_btn_index[slot] : -1;
 }
 int vr_wheel_btn_action(int slot) {
-    return (slot >= 0 && slot < 10) ? g_s.wheel_btn_action[slot] : 0;
+    return (slot >= 0 && slot < 12) ? g_s.wheel_btn_action[slot] : 0;
 }
 // Bumped to ask the input layer to forget its learned wheel and pedal ranges.
 static int g_wheel_recal = 0;
@@ -1789,14 +1792,14 @@ extern "C" void vr_draw_wheel_settings(void) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The four directions are consecutive from here:\n"
                           "base+0 Left, +1 Up, +2 Right, +3 Down. 272 on a G923.");
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 12; i++) {
         char lbl[32];
         snprintf(lbl, sizeof(lbl), "Button %d index", i + 1);
         ImGui::SliderInt(lbl, &g_s.wheel_btn_index[i], -1, 520);
         snprintf(lbl, sizeof(lbl), "Button %d does", i + 1);
         ImGui::Combo(lbl, &g_s.wheel_btn_action[i],
                      "Boost\0Slide\0Look back\0Confirm\0Back / pause\0Repair\0Camera\0"
-                     "Charge boost (hold)\0Roll left\0Roll right\0");
+                     "Charge boost (hold)\0Roll left\0Roll right\0Boost + Confirm\0");
         if (i == 0 && ImGui::IsItemHovered())
             ImGui::SetTooltip("Charge boost is the game's hold-up-to-charge input. Put it on a\n"
                               "button you can hold while steering, then fire with Boost. It\n"

@@ -195,7 +195,7 @@ int vr_wheel_clutch_action(void);
 int vr_wheel_dpad_base(void);
 // Six assignable buttons. Action: 0 Boost, 1 Slide, 2 Look back, 3 Confirm,
 // 4 Back/pause, 5 Repair, 6 Camera, 7 Charge boost (the hold-up-to-charge input),
-// 8 Roll left, 9 Roll right.
+// 8 Roll left, 9 Roll right, 10 Boost + Confirm (A's double duty on a gamepad).
 int vr_wheel_btn_index(int slot);
 int vr_wheel_btn_action(int slot);
 // Changes when the user asks for recalibration; the input layer forgets its learned
