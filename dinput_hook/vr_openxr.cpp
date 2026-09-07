@@ -254,9 +254,6 @@ struct VrState {
     // gamepad. The earlier attempt watched axis 0 for movement, which a pad's left stick
     // trips, and that is why it had to become a manual switch at the time.
     int wheel_mode = 0;
-    // Put the wheel's centring spring back while the game runs. DirectInput turns autocentre
-    // off when an app acquires a force-feedback device, and this game never replaces it.
-    bool wheel_autocenter = true;
     // Defaults below are a complete Logitech G923 map, measured on one. Another wheel will
     // report different axis and button numbers, so they are still settings -- but a G923 user
     // only has to tick the switch, and anyone else has a working layout to adjust rather than
@@ -374,7 +371,6 @@ static void vr_settings_load(void) {
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     g_s.wheel_mode = (int) vr_ini_get_f("wheel_mode", (float) g_s.wheel_mode);
-    g_s.wheel_autocenter = vr_ini_get_b("wheel_autocenter", g_s.wheel_autocenter);
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     g_s.wheel_suppress_game_input =
         vr_ini_get_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
@@ -426,7 +422,6 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     vr_ini_set_f("wheel_mode", (float) g_s.wheel_mode);
-    vr_ini_set_b("wheel_autocenter", g_s.wheel_autocenter);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
     vr_ini_set_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
@@ -1434,9 +1429,6 @@ int vr_wheel_enabled(void) {
         return 0;// forced off
     return vr_wheel_device_present();// auto
 }
-int vr_wheel_autocenter(void) {
-    return g_s.wheel_autocenter ? 1 : 0;
-}
 int vr_wheel_steer_axis(void) {
     return vr_wheel_enabled() ? g_s.wheel_steer_axis : -1;
 }
@@ -1760,11 +1752,6 @@ extern "C" void vr_draw_wheel_settings(void) {
                           "itself as something other than a driving device.");
     ImGui::SameLine();
     ImGui::TextDisabled(vr_wheel_device_present() ? "(wheel detected)" : "(no wheel seen)");
-    ImGui::Checkbox("Restore wheel centring spring", &g_s.wheel_autocenter);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The game switches the wheel's autocentre off when it takes the\n"
-                          "device and never replaces it, leaving the wheel slack and the\n"
-                          "steering twitchy. Takes effect on the next launch.");
     ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
                        "axis binding. Turn the wheel and watch which axis below moves, then\n"
                        "set that number. -1 is off.");

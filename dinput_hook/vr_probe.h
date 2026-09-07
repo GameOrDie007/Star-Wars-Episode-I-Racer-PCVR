@@ -185,7 +185,6 @@ int vr_wheel_direct_button(int i);// 0..31
 int vr_wheel_direct_axis(int i);  // 0..7, raw
 int vr_wheel_direct_pov(int i);   // 0..3, hundredths of a degree, -1 centred
 // Restore the wheel's centring spring, which DirectInput disables on acquisition.
-int vr_wheel_autocenter(void);
 int vr_wheel_steer_axis(void);
 int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
 float vr_wheel_deadzone(void);
