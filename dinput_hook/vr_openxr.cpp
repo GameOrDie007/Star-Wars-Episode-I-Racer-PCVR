@@ -242,6 +242,11 @@ struct VrState {
     // game's own axis binding. -1 disables it. Which axis a given wheel lands on is not
     // predictable, so the panel shows every axis live and the user picks the one that
     // moves. Off by default: this is written without a wheel to test against.
+    // Master switch for every wheel feature. OFF by default and deliberately not
+    // autodetected: a pad's left stick is axis 0 and its buttons share the same indices a
+    // wheel uses, so no runtime test can tell them apart. Guessing wrong breaks pad,
+    // keyboard and headset users who never asked for wheel support at all.
+    bool wheel_enabled = false;
     int wheel_steer_axis = -1;
     // Stop the GAME acting on the joystick itself while we read its axes for steering.
     // With a wheel attached the pedals rest at full deflection, which the game treats as a
@@ -349,6 +354,7 @@ static void vr_settings_load(void) {
     g_s.haptic_impact_scale = vr_ini_get_f("haptic_impact_scale", g_s.haptic_impact_scale);
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
+    g_s.wheel_enabled = vr_ini_get_b("wheel_enabled", g_s.wheel_enabled);
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     g_s.wheel_suppress_game_input =
         vr_ini_get_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
@@ -399,6 +405,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_impact_scale", g_s.haptic_impact_scale);
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
+    vr_ini_set_b("wheel_enabled", g_s.wheel_enabled);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
     vr_ini_set_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
@@ -1399,8 +1406,11 @@ float vr_flare_size_units(void) {
                                    : 1.0f);
 }
 
+int vr_wheel_enabled(void) {
+    return g_s.wheel_enabled ? 1 : 0;
+}
 int vr_wheel_steer_axis(void) {
-    return g_s.wheel_steer_axis;
+    return g_s.wheel_enabled ? g_s.wheel_steer_axis : -1;
 }
 int vr_wheel_suppress_game_input(void) {
     return g_s.wheel_suppress_game_input ? 1 : 0;
@@ -1797,6 +1807,11 @@ void vr_probe_draw_imgui(void) {
     ImGui::SliderFloat("Wall deadband", &g_s.haptic_wall_deadband, 0.1f, 20.0f, "%.2f");
 
     ImGui::SeparatorText("Wheel / joystick steering (experimental)");
+    ImGui::Checkbox("Enable wheel support", &g_s.wheel_enabled);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Leave OFF unless you are using a wheel. A gamepad shares the\n"
+                          "same axis and button numbers, so wheel support cannot be\n"
+                          "detected automatically and would fight a pad if left on.");
     ImGui::TextWrapped("Drives steering from a raw DirectInput axis, skipping the game's own\n"
                        "axis binding. Turn the wheel and watch which axis below moves, then\n"
                        "set that number. -1 is off.");

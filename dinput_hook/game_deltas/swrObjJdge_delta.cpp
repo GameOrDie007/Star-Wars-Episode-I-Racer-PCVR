@@ -247,48 +247,19 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // pedals rest at 65535, which it reads as a held input. Clear the flags its downstream
     // logic consults, AFTER the original has run -- the original is what fills
     // stdControl_aAxisPos, which the wheel steering reads, so this must not come first.
-    {
-        // "Is a wheel plugged in" cannot be answered by a setting -- the setting outlives the
-        // hardware. Wait until the configured steer axis actually moves. With no wheel the axis
-        // never moves, nothing is suppressed, and a pad or keyboard behaves exactly as it did
-        // before any wheel support existed.
-        static int steer_rest = 0;
-        static int steer_rest_ok = 0;
-        static int settle = 0;
-        static int wheel_live = 0;
+    // Only ever on the user's explicit say-so. Autodetection was tried and cannot work:
+    // a pad's left stick is axis 0, so moving it looked exactly like a wheel arriving.
+    if (vr_wheel_enabled() && vr_wheel_suppress_game_input()) {
         static int suppress_logged = 0;
-
-        const int sa = vr_wheel_steer_axis();
-        if (sa >= 0 && sa < 15) {
-            if (!steer_rest_ok) {
-                // Same reason as the button rest capture: the arrays are not populated on the
-                // first frames, and a rest value of zero would make any real reading look like
-                // movement.
-                if (++settle >= 30) {
-                    steer_rest_ok = 1;
-                    steer_rest = stdControl_aAxisPos[sa];
-                }
-            } else if (!wheel_live) {
-                int d = stdControl_aAxisPos[sa] - steer_rest;
-                if (d < 0)
-                    d = -d;
-                if (d > 1000)
-                    wheel_live = 1;
-            }
+        if (!suppress_logged) {
+            suppress_logged = 1;
+            fprintf(hook_log,
+                    "[wheel] suppressing game joystick input (was detected=%d enabled=%d)\n",
+                    joystick_detected, swrConfig_joystick_enabled);
+            fflush(hook_log);
         }
-
-        if (wheel_live && vr_wheel_suppress_game_input()) {
-            if (!suppress_logged) {
-                suppress_logged = 1;
-                fprintf(hook_log,
-                        "[wheel] wheel detected on axis %d - suppressing game joystick input"
-                        " (was detected=%d enabled=%d)\n",
-                        sa, joystick_detected, swrConfig_joystick_enabled);
-                fflush(hook_log);
-            }
-            joystick_detected = 0;
-            swrConfig_joystick_enabled = 0;
-        }
+        joystick_detected = 0;
+        swrConfig_joystick_enabled = 0;
     }
 
     // Wheel D-pad and buttons. Read here, before the VR block, so their state can be
@@ -326,14 +297,16 @@ void stdControl_ReadControls_boostfix_delta(void) {
             }
         }
 
-        const int base = vr_wheel_dpad_base();
+        // Gated on the master switch: without it, a pad's hat is handled by the game AND
+        // mapped here, so one press moved the menu twice.
+        const int base = vr_wheel_enabled() ? vr_wheel_dpad_base() : -1;
         if (rest_ready && base >= 0 && base + 3 < 528) {
             wdp_l = stdControl_aKeyInfos[base + 0] != 0 && !btn_rest[base + 0];
             wdp_u = stdControl_aKeyInfos[base + 1] != 0 && !btn_rest[base + 1];
             wdp_r = stdControl_aKeyInfos[base + 2] != 0 && !btn_rest[base + 2];
             wdp_d = stdControl_aKeyInfos[base + 3] != 0 && !btn_rest[base + 3];
         }
-        for (int s = 0; rest_ready && s < 8; s++) {
+        for (int s = 0; rest_ready && vr_wheel_enabled() && s < 8; s++) {
             const int bi = vr_wheel_btn_index(s);
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
                 continue;
