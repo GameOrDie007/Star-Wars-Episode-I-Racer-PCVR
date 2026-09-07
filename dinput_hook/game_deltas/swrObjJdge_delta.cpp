@@ -273,10 +273,26 @@ void stdControl_ReadControls_boostfix_delta(void) {
                 p_hi[i] = -0x7fffffff;
             }
         }
+        // Forget the learned ranges when the user asks. Auto-calibration only ever widens,
+        // so without this a single spurious reading is permanent for the session.
+        static int seen_recal = -1;
+        const int recal = vr_wheel_recal_generation();
+        if (recal != seen_recal) {
+            seen_recal = recal;
+            for (int i = 0; i < 15; i++) {
+                p_lo[i] = 0x7fffffff;
+                p_hi[i] = -0x7fffffff;
+            }
+        }
         const float thr = vr_wheel_pedal_threshold();
-        const int pedals[2] = {vr_wheel_throttle_axis(), vr_wheel_brake_axis()};
-        const int keys[2] = {VRK_ACCEL, VRK_BRAKE};
-        for (int k = 0; k < 2; k++) {
+        static const int clutch_keys[3] = {VRK_SLIDE, VRK_BOOST, VRK_LOOKBACK};
+        int ca = vr_wheel_clutch_action();
+        if (ca < 0 || ca > 2)
+            ca = 0;
+        const int pedals[3] = {vr_wheel_throttle_axis(), vr_wheel_brake_axis(),
+                               vr_wheel_clutch_axis()};
+        const int keys[3] = {VRK_ACCEL, VRK_BRAKE, clutch_keys[ca]};
+        for (int k = 0; k < 3; k++) {
             const int a = pedals[k];
             if (a < 0 || a >= 15)
                 continue;
@@ -291,13 +307,14 @@ void stdControl_ReadControls_boostfix_delta(void) {
             // Rest is the HIGH end and pressing falls towards the low end, so invert.
             const float t = (float) (p_hi[a] - raw) / (float) span;
             vr_hold_key(keys[k], t > thr);
-            static int pedal_logged[2] = {0, 0};
+            static int pedal_logged[3] = {0, 0, 0};
+            static const char *pedal_name[3] = {"THROTTLE", "BRAKE", "CLUTCH"};
             if (!pedal_logged[k] && t > thr) {
                 pedal_logged[k] = 1;
                 fprintf(hook_log,
                         "[wheel] pedal %s axis %d LIVE: raw=%d lo=%d hi=%d -> %.2f"
                         "  (game throttle=%.3f thrust=%.3f)\n",
-                        k == 0 ? "THROTTLE" : "BRAKE", a, raw, p_lo[a], p_hi[a], t,
+                        pedal_name[k], a, raw, p_lo[a], p_hi[a], t,
                         swrRace_ThrottleInput, swrRace_ThrustInput);
                 fflush(hook_log);
             }
