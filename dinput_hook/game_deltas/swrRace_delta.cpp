@@ -389,9 +389,11 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
                 const int dh = hi - centre;
                 half = dl > dh ? dl : dh;
             }
-            // Until the wheel has been moved enough for the span to mean something, steer
-            // nothing. Guessing from a half-turn is worse than leaving the pad in charge.
-            if (half >= 4000) {
+            // Enough movement for the span to mean something. Measured across six sessions,
+            // this wheel only ever reports about +/-4000 counts of a possible +/-32767 -- so
+            // the original 4000 gate left steering inactive in half of them. 1200 still
+            // rejects noise while working with the range the device actually produces.
+            if (half >= 1200) {
                 if (!cal_logged) {
                     cal_logged = 1;
                     fprintf(hook_log, "[wheel] axis %d calibrated: min=%d max=%d centre=%d half=%d\n",
