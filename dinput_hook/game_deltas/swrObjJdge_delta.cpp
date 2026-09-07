@@ -276,16 +276,38 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // continuously and the keyboard appear dead. Capture what is down while untouched and
         // ignore exactly those.
         static int btn_rest[528];
+        static int down_run[528];// consecutive frames each index has been down
         static int rest_ready = 0;
         static int rest_frames = 0;
+        static int rest_recal = -1;
+
+        // Recalibrate clears the list too: a control wrongly blacklisted would otherwise stay
+        // dead for the whole session with no way back.
+        const int rc = vr_wheel_recal_generation();
+        if (rc != rest_recal) {
+            rest_recal = rc;
+            rest_ready = 0;
+            rest_frames = 0;
+            for (int i = 0; i < 528; i++) {
+                btn_rest[i] = 0;
+                down_run[i] = 0;
+            }
+        }
+
         if (!rest_ready) {
-            // Not the very first frame: the input arrays are not populated yet then, and a rest
-            // state of all-zero would defeat the whole check.
-            if (++rest_frames >= 30) {
+            // A control that RESTS pressed is down continuously; one the player happened to be
+            // pressing is not. Sampling a single instant confused the two and disabled LB --
+            // Charge boost -- for a session simply because it was held during startup.
+            for (int i = 256; i < 528; i++)
+                down_run[i] = (stdControl_aKeyInfos[i] != 0) ? down_run[i] + 1 : 0;
+
+            // Two seconds at 60fps. Long enough that nobody holds a button through it by
+            // accident, short enough not to delay the mapping noticeably.
+            if (++rest_frames >= 120) {
                 rest_ready = 1;
                 int stuck = 0;
                 for (int i = 0; i < 528; i++) {
-                    btn_rest[i] = (i >= 256) ? (stdControl_aKeyInfos[i] != 0) : 0;
+                    btn_rest[i] = (i >= 256 && down_run[i] >= 120) ? 1 : 0;
                     if (btn_rest[i]) {
                         stuck++;
                         fprintf(hook_log,
