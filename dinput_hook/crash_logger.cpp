@@ -73,6 +73,27 @@ static void write_env_line(HANDLE out) {
     write_fmt(out, "  environment: Wine %s on %s %s\n", ver ? ver : "?", sysname, release);
 }
 
+// This DLL's own load base. Taken from an address inside this file, so it needs no global and
+// cannot be confused with anything else that happens to be loaded.
+static HMODULE self_module(void) {
+    static HMODULE self = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR) &self_module, &self);
+    }
+    return self;
+}
+
+// Name the module an address belongs to, unambiguously.
+//
+// A basename is NOT enough here: this mod ships as a dinput.dll proxy, so both it and
+// Microsoft's dinput.dll are loaded and a fault in either printed the same 'DINPUT.dll+0x...'.
+// The v1.2 race-end crash was misread as Microsoft's for most of a day; it was ours, and the
+// offset resolved straight to the faulting instruction once that was known. So print the parent
+// directory too, and mark our own module outright.
 static void log_addr(HANDLE out, void *addr) {
     HMODULE mod = nullptr;
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -81,10 +102,22 @@ static void log_addr(HANDLE out, void *addr) {
         mod) {
         char path[MAX_PATH] = {0};
         GetModuleFileNameA(mod, path, MAX_PATH);
-        const char *name = strrchr(path, '\\');
-        name = name ? name + 1 : path;
-        write_fmt(out, "    %p  %s+0x%lx\n", addr, name,
-                  (unsigned long) ((UINT_PTR) addr - (UINT_PTR) mod));
+        // Keep the last two path components: 'System32\\dinput.dll' can then never be mistaken
+        // for 'Star Wars Episode I Racer\\dinput.dll'.
+        const char *name = path;
+        const char *last = strrchr(path, '\\');
+        if (last != nullptr) {
+            name = last + 1;
+            const char *prev = nullptr;
+            for (const char *p = path; p < last; p++)
+                if (*p == '\\')
+                    prev = p;
+            if (prev != nullptr)
+                name = prev + 1;
+        }
+        write_fmt(out, "    %p  %s+0x%lx%s\n", addr, name,
+                  (unsigned long) ((UINT_PTR) addr - (UINT_PTR) mod),
+                  mod == self_module() ? "   <== THIS MOD" : "");
     } else {
         write_fmt(out, "    %p  (no module)\n", addr);
     }
@@ -123,6 +156,9 @@ static void write_exception_report(HANDLE out, const EXCEPTION_RECORD *er, UINT_
               er->ExceptionAddress);
     write_env_line(out);
     write_fmt(out, "  last stage: %s\n", g_last_stage);
+    // With this, any "THIS MOD+0x..." line below can be resolved against the shipped build
+    // (objdump -d / addr2line at base+offset) without needing to reproduce the crash.
+    write_fmt(out, "  this mod loaded at: %p\n", (void *) self_module());
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
         write_fmt(out, "    access %s at %p\n", er->ExceptionInformation[0] ? "write" : "read",
                   (void *) er->ExceptionInformation[1]);
