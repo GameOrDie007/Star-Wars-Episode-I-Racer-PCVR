@@ -274,7 +274,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
             wdp_r = stdControl_aKeyInfos[base + 2] != 0;
             wdp_d = stdControl_aKeyInfos[base + 3] != 0;
         }
-        for (int s = 0; s < 4; s++) {
+        for (int s = 0; s < 6; s++) {
             const int bi = vr_wheel_btn_index(s);
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0)
                 continue;
