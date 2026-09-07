@@ -243,6 +243,23 @@ static void vr_menu_key(int vk, bool down, int slot) {
 void stdControl_ReadControls_boostfix_delta(void) {
     hook_call_original((stdControl_ReadControls_t) stdControl_ReadControls_ADDR);
 
+    // With a wheel attached the game's own joystick handling makes menus unusable: the
+    // pedals rest at 65535, which it reads as a held input. Clear the flags its downstream
+    // logic consults, AFTER the original has run -- the original is what fills
+    // stdControl_aAxisPos, which the wheel steering reads, so this must not come first.
+    if (vr_wheel_steer_axis() >= 0 && vr_wheel_suppress_game_input()) {
+        static int suppress_logged = 0;
+        if (!suppress_logged) {
+            suppress_logged = 1;
+            fprintf(hook_log,
+                    "[wheel] suppressing game joystick input (was detected=%d enabled=%d)\n",
+                    joystick_detected, swrConfig_joystick_enabled);
+            fflush(hook_log);
+        }
+        joystick_detected = 0;
+        swrConfig_joystick_enabled = 0;
+    }
+
     // Axis activity scan. Logs each DirectInput axis the first time it moves, once per
     // axis, so one session identifies which slot a wheel or pedal set lands on. Runs in
     // menus as well as races, and is independent of any wheel setting -- a diagnostic

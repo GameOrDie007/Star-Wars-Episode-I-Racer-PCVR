@@ -243,6 +243,10 @@ struct VrState {
     // predictable, so the panel shows every axis live and the user picks the one that
     // moves. Off by default: this is written without a wheel to test against.
     int wheel_steer_axis = -1;
+    // Stop the GAME acting on the joystick itself while we read its axes for steering.
+    // With a wheel attached the pedals rest at full deflection, which the game treats as a
+    // held input: menus scroll and confirm on their own and the keyboard appears dead.
+    bool wheel_suppress_game_input = true;
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -325,6 +329,8 @@ static void vr_settings_load(void) {
     g_s.haptic_wall_scale = vr_ini_get_f("haptic_wall_scale", g_s.haptic_wall_scale);
     g_s.haptic_wall_deadband = vr_ini_get_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
+    g_s.wheel_suppress_game_input =
+        vr_ini_get_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
     g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
     g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
     g_s.wheel_invert = vr_ini_get_b("wheel_invert", g_s.wheel_invert);
@@ -355,6 +361,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_wall_scale", g_s.haptic_wall_scale);
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
+    vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
     vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
     vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
     vr_ini_set_b("wheel_invert", g_s.wheel_invert);
@@ -1342,6 +1349,9 @@ float vr_flare_size_units(void) {
 int vr_wheel_steer_axis(void) {
     return g_s.wheel_steer_axis;
 }
+int vr_wheel_suppress_game_input(void) {
+    return g_s.wheel_suppress_game_input ? 1 : 0;
+}
 int vr_wheel_range(void) {
     return g_s.wheel_range;
 }
@@ -1706,6 +1716,14 @@ void vr_probe_draw_imgui(void) {
                        "axis binding. Turn the wheel and watch which axis below moves, then\n"
                        "set that number. -1 is off.");
     ImGui::SliderInt("Steer axis", &g_s.wheel_steer_axis, -1, 14);
+    ImGui::Checkbox("Stop the game reading the joystick itself",
+                    &g_s.wheel_suppress_game_input);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Wheel pedals rest at full deflection, which the game treats as\n"
+                          "a held input -- menus move on their own and the keyboard seems\n"
+                          "dead. This leaves the axes readable for steering but stops the\n"
+                          "game acting on them. Turn off to use the game's own joystick\n"
+                          "support instead.");
     ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
     ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
     ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
