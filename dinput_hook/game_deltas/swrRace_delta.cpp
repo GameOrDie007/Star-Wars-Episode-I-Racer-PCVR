@@ -349,18 +349,36 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
         const int ax = vr_wheel_steer_axis();
         if (ax >= 0 && ax < 15) {
             const int raw = stdControl_aAxisPos[ax];
-            int range = vr_wheel_range();
-            if (range <= 0) {
-                // Auto-calibrate: scale to the largest magnitude seen so far. One full
-                // turn each way sets it, and it can only widen, so it never clips.
-                static int seen_max = 0;
-                const int mag = raw < 0 ? -raw : raw;
-                if (mag > seen_max)
-                    seen_max = mag;
-                range = seen_max;
+            // The axis is UNSIGNED and centred, not signed: a G923 reads 0..65535 with the
+            // centre near 32767. Dividing the raw value directly gives ~1.0 with the wheel
+            // straight, i.e. permanent full lock. Centre and half-range are learned from the
+            // observed extremes instead, so one turn lock to lock calibrates any device.
+            static int lo = 0x7fffffff;
+            static int hi = -0x7fffffff;
+            static int cal_logged = 0;
+            if (raw < lo)
+                lo = raw;
+            if (raw > hi)
+                hi = raw;
+
+            int half = vr_wheel_range();// manual override, in raw counts either side of centre
+            int centre;
+            if (half > 0) {
+                centre = (lo + hi) / 2;
+            } else {
+                centre = (lo + hi) / 2;
+                half = (hi - lo) / 2;
             }
-            if (range > 0) {
-                float w = (float) raw / (float) range;
+            // Until the wheel has been moved enough for the span to mean something, steer
+            // nothing. Guessing from a half-turn is worse than leaving the pad in charge.
+            if (half >= 4000) {
+                if (!cal_logged) {
+                    cal_logged = 1;
+                    fprintf(hook_log, "[wheel] axis %d calibrated: min=%d max=%d centre=%d half=%d\n",
+                            ax, lo, hi, centre, half);
+                    fflush(hook_log);
+                }
+                float w = (float) (raw - centre) / (float) half;
                 if (w > 1.0f)
                     w = 1.0f;
                 else if (w < -1.0f)
@@ -371,8 +389,8 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
                     static int wheel_logged = 0;
                     if (!wheel_logged) {
                         wheel_logged = 1;
-                        fprintf(hook_log, "[wheel] axis %d LIVE: raw=%d range=%d -> steer=%.3f\n",
-                                ax, raw, range, swrRace_SteeringInput);
+                        fprintf(hook_log, "[wheel] axis %d LIVE: raw=%d centre=%d -> steer=%.3f\n",
+                                ax, raw, centre, swrRace_SteeringInput);
                         fflush(hook_log);
                     }
                 }
