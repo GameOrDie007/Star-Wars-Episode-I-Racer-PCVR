@@ -372,10 +372,29 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
             // instead put the zero point 3925 counts out on a real session -- nearly the whole
             // half range -- because the wheel had been turned further one way than the other.
             // The wheel then read near full lock while sitting straight.
+            // Latch the centre only once the wheel has been STILL for about half a second.
+            // Capturing on first sight caught it mid-turn on a real session -- centre came
+            // out equal to max -- and every reading after that is biased by the error.
             if (!have_centre) {
-                have_centre = 1;
-                centre = raw;
+                static int still_frames = 0;
+                static int last_raw = 0;
+                int d = raw - last_raw;
+                if (d < 0)
+                    d = -d;
+                last_raw = raw;
+                if (d < 200) {
+                    if (++still_frames >= 45) {
+                        have_centre = 1;
+                        centre = raw;
+                        still_frames = 0;
+                    }
+                } else {
+                    still_frames = 0;
+                }
             }
+            // Skip only the wheel maths until the centre is known. NOT a return: this function
+            // must still reach hook_call_original, or the pod gets no control input at all.
+            if (have_centre) {
             if (raw < lo)
                 lo = raw;
             if (raw > hi)
@@ -418,6 +437,7 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
                     }
                 }
             }
+            }// have_centre
         }
     }
     if (player != nullptr && g_vr_analog_active != 0 &&
