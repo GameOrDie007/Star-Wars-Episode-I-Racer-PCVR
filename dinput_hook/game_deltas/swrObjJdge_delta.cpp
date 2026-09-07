@@ -267,7 +267,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // callers for one scancode would fight -- vr_hold_key keeps a single was[] per key, so
     // whichever ran second would clear the other's press the same frame.
     bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
-    bool wbtn[10] = {};// indexed by action id
+    bool wbtn[11] = {};// indexed by action id
     bool wped[3] = {};// throttle, brake, clutch -- OR-ed in below, never injected directly
     {
         // A control that rests in the DOWN state would otherwise be held forever. The pedals
@@ -307,12 +307,12 @@ void stdControl_ReadControls_boostfix_delta(void) {
             wdp_r = stdControl_aKeyInfos[base + 2] != 0 && !btn_rest[base + 2];
             wdp_d = stdControl_aKeyInfos[base + 3] != 0 && !btn_rest[base + 3];
         }
-        for (int s = 0; rest_ready && vr_wheel_enabled() && s < 10; s++) {
+        for (int s = 0; rest_ready && vr_wheel_enabled() && s < 12; s++) {
             const int bi = vr_wheel_btn_index(s);
             if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0 || btn_rest[bi])
                 continue;
             int act = vr_wheel_btn_action(s);
-            if (act < 0 || act > 9)
+            if (act < 0 || act > 10)
                 act = 0;
             wbtn[act] = true;
         }
@@ -579,7 +579,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
                 vr_haptic_event(0.55f, 120.0f);
             boost_was = boost_now;
         }
-        vr_hold_key(VRK_BOOST, vr_input_boost() != 0 || wbtn[0]);
+        vr_hold_key(VRK_BOOST, vr_input_boost() != 0 || wbtn[0] || wbtn[10]);
         // B is Back/Cancel EVERYWHERE, with no context test. During a race that means
         // pause, which is what a Back button should do there and what console players
         // expect. Two attempts at splitting B by context both failed -- see the note on
@@ -598,7 +598,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_ROLLR, vr_input_roll_right() != 0 || wbtn[9]);
         // Menu confirm/cancel ride the same buttons; the front end uses the event path below,
         // and these scancodes mean nothing to it, so the two cannot collide.
-        vr_hold_key(VRK_ENTER, vr_input_boost() != 0 || wbtn[3]);
+        vr_hold_key(VRK_ENTER, vr_input_boost() != 0 || wbtn[3] || wbtn[10]);
         // Escape from either button, unconditionally.
         vr_hold_key(VRK_ESC, vr_input_menu() != 0 || cancel_btn || wbtn[4]);
 
@@ -615,7 +615,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_menu_key(VRVK_DOWN, pitch < -deadzone || wdp_d, 1);
         vr_menu_key(VRVK_LEFT, menu_x < -deadzone || wdp_l, 2);
         vr_menu_key(VRVK_RIGHT, menu_x > deadzone || wdp_r, 3);
-        vr_menu_key(VRVK_RETURN, vr_input_boost() != 0 || wbtn[3], 4);
+        vr_menu_key(VRVK_RETURN, vr_input_boost() != 0 || wbtn[3] || wbtn[10], 4);
         vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0 || wbtn[4], 5);
 
         // The control-type byte decides whether the analog globals above are read at all,
@@ -648,10 +648,10 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_hold_key(VRK_RIGHT, wdp_r);
         vr_hold_key(VRK_NOSEDOWN, wdp_u || wbtn[7]);
         vr_hold_key(VRK_PULLUP, wdp_d);
-        vr_hold_key(VRK_BOOST, wbtn[0]);
+        vr_hold_key(VRK_BOOST, wbtn[0] || wbtn[10]);
         vr_hold_key(VRK_SLIDE, wbtn[1]);
         vr_hold_key(VRK_LOOKBACK, wbtn[2]);
-        vr_hold_key(VRK_ENTER, wbtn[3]);
+        vr_hold_key(VRK_ENTER, wbtn[3] || wbtn[10]);
         vr_hold_key(VRK_ESC, wbtn[4]);
         vr_hold_key(VRK_REPAIR, wbtn[5]);
         vr_hold_key(VRK_VIEW, wbtn[6]);
@@ -661,7 +661,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_menu_key(VRVK_DOWN, wdp_d, 1);
         vr_menu_key(VRVK_LEFT, wdp_l, 2);
         vr_menu_key(VRVK_RIGHT, wdp_r, 3);
-        vr_menu_key(VRVK_RETURN, wbtn[3], 4);
+        vr_menu_key(VRVK_RETURN, wbtn[3] || wbtn[10], 4);
         vr_menu_key(VRVK_ESCAPE, wbtn[4], 5);
     }
 
