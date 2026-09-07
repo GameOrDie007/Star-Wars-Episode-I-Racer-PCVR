@@ -247,6 +247,13 @@ struct VrState {
     // With a wheel attached the pedals rest at full deflection, which the game treats as a
     // held input: menus scroll and confirm on their own and the keyboard appears dead.
     bool wheel_suppress_game_input = true;
+    // Pedal axes. Unipolar and inverted: they rest at maximum and fall as pressed, so
+    // they auto-calibrate on their own min/max rather than sharing the steering logic.
+    // Which is throttle and which is brake cannot be told apart by watching them move,
+    // so both are settings and can be swapped live.
+    int wheel_throttle_axis = -1;
+    int wheel_brake_axis = -1;
+    float wheel_pedal_threshold = 0.15f;
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -331,6 +338,11 @@ static void vr_settings_load(void) {
     g_s.wheel_steer_axis = (int) vr_ini_get_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     g_s.wheel_suppress_game_input =
         vr_ini_get_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
+    g_s.wheel_throttle_axis =
+        (int) vr_ini_get_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
+    g_s.wheel_brake_axis = (int) vr_ini_get_f("wheel_brake_axis", (float) g_s.wheel_brake_axis);
+    g_s.wheel_pedal_threshold =
+        vr_ini_get_f("wheel_pedal_threshold", g_s.wheel_pedal_threshold);
     g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
     g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
     g_s.wheel_invert = vr_ini_get_b("wheel_invert", g_s.wheel_invert);
@@ -362,6 +374,9 @@ void vr_settings_save(void) {
     vr_ini_set_f("haptic_wall_deadband", g_s.haptic_wall_deadband);
     vr_ini_set_f("wheel_steer_axis", (float) g_s.wheel_steer_axis);
     vr_ini_set_b("wheel_suppress_game_input", g_s.wheel_suppress_game_input);
+    vr_ini_set_f("wheel_throttle_axis", (float) g_s.wheel_throttle_axis);
+    vr_ini_set_f("wheel_brake_axis", (float) g_s.wheel_brake_axis);
+    vr_ini_set_f("wheel_pedal_threshold", g_s.wheel_pedal_threshold);
     vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
     vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
     vr_ini_set_b("wheel_invert", g_s.wheel_invert);
@@ -1352,6 +1367,15 @@ int vr_wheel_steer_axis(void) {
 int vr_wheel_suppress_game_input(void) {
     return g_s.wheel_suppress_game_input ? 1 : 0;
 }
+int vr_wheel_throttle_axis(void) {
+    return g_s.wheel_throttle_axis;
+}
+int vr_wheel_brake_axis(void) {
+    return g_s.wheel_brake_axis;
+}
+float vr_wheel_pedal_threshold(void) {
+    return g_s.wheel_pedal_threshold;
+}
 int vr_wheel_range(void) {
     return g_s.wheel_range;
 }
@@ -1725,6 +1749,11 @@ void vr_probe_draw_imgui(void) {
                           "game acting on them. Turn off to use the game's own joystick\n"
                           "support instead.");
     ImGui::SliderFloat("Wheel deadzone", &g_s.wheel_deadzone, 0.0f, 0.30f, "%.2f");
+    ImGui::SliderInt("Throttle axis", &g_s.wheel_throttle_axis, -1, 14);
+    ImGui::SliderInt("Brake axis", &g_s.wheel_brake_axis, -1, 14);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("If the pedals are the wrong way round, swap these two numbers.");
+    ImGui::SliderFloat("Pedal threshold", &g_s.wheel_pedal_threshold, 0.02f, 0.60f, "%.2f");
     ImGui::Checkbox("Invert wheel", &g_s.wheel_invert);
     ImGui::SliderInt("Range (0 = auto)", &g_s.wheel_range, 0, 65535);
     if (ImGui::IsItemHovered())
