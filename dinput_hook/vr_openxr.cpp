@@ -257,6 +257,12 @@ struct VrState {
     // Third pedal. 0 = Slide, 1 = Boost, 2 = Look back.
     int wheel_clutch_axis = -1;
     int wheel_clutch_action = 0;
+    // D-pad: the four directions sit in one contiguous block, measured as
+    // 272 Left, 273 Up, 274 Right, 275 Down, so one base index covers all four.
+    int wheel_dpad_base = -1;
+    // Four freely assignable buttons. Action ids below.
+    int wheel_btn_index[4] = {-1, -1, -1, -1};
+    int wheel_btn_action[4] = {0, 1, 3, 4};
     // Raw counts at full lock. 0 means auto: track the largest magnitude seen and scale
     // to that, which self-calibrates after one full turn in each direction.
     int wheel_range = 0;
@@ -355,6 +361,14 @@ static void vr_settings_load(void) {
         (int) vr_ini_get_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
     g_s.wheel_clutch_action =
         (int) vr_ini_get_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
+    g_s.wheel_dpad_base = (int) vr_ini_get_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
+    for (int i = 0; i < 4; i++) {
+        char k[40];
+        snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
+        g_s.wheel_btn_index[i] = (int) vr_ini_get_f(k, (float) g_s.wheel_btn_index[i]);
+        snprintf(k, sizeof(k), "wheel_btn%d_action", i + 1);
+        g_s.wheel_btn_action[i] = (int) vr_ini_get_f(k, (float) g_s.wheel_btn_action[i]);
+    }
     g_s.wheel_range = (int) vr_ini_get_f("wheel_range", (float) g_s.wheel_range);
     g_s.wheel_deadzone = vr_ini_get_f("wheel_deadzone", g_s.wheel_deadzone);
     g_s.wheel_sensitivity = vr_ini_get_f("wheel_sensitivity", g_s.wheel_sensitivity);
@@ -392,6 +406,14 @@ void vr_settings_save(void) {
     vr_ini_set_f("wheel_pedal_threshold", g_s.wheel_pedal_threshold);
     vr_ini_set_f("wheel_clutch_axis", (float) g_s.wheel_clutch_axis);
     vr_ini_set_f("wheel_clutch_action", (float) g_s.wheel_clutch_action);
+    vr_ini_set_f("wheel_dpad_base", (float) g_s.wheel_dpad_base);
+    for (int i = 0; i < 4; i++) {
+        char k[40];
+        snprintf(k, sizeof(k), "wheel_btn%d_index", i + 1);
+        vr_ini_set_f(k, (float) g_s.wheel_btn_index[i]);
+        snprintf(k, sizeof(k), "wheel_btn%d_action", i + 1);
+        vr_ini_set_f(k, (float) g_s.wheel_btn_action[i]);
+    }
     vr_ini_set_f("wheel_range", (float) g_s.wheel_range);
     vr_ini_set_f("wheel_deadzone", g_s.wheel_deadzone);
     vr_ini_set_f("wheel_sensitivity", g_s.wheel_sensitivity);
@@ -1398,6 +1420,15 @@ int vr_wheel_clutch_axis(void) {
 int vr_wheel_clutch_action(void) {
     return g_s.wheel_clutch_action;
 }
+int vr_wheel_dpad_base(void) {
+    return g_s.wheel_dpad_base;
+}
+int vr_wheel_btn_index(int slot) {
+    return (slot >= 0 && slot < 4) ? g_s.wheel_btn_index[slot] : -1;
+}
+int vr_wheel_btn_action(int slot) {
+    return (slot >= 0 && slot < 4) ? g_s.wheel_btn_action[slot] : 0;
+}
 // Bumped to ask the input layer to forget its learned wheel and pedal ranges.
 static int g_wheel_recal = 0;
 int vr_wheel_recal_generation(void) {
@@ -1789,6 +1820,18 @@ void vr_probe_draw_imgui(void) {
         ImGui::SetTooltip("If the pedals are the wrong way round, swap these two numbers.");
     ImGui::SliderFloat("Pedal threshold", &g_s.wheel_pedal_threshold, 0.02f, 0.60f, "%.2f");
     ImGui::SliderInt("Clutch axis", &g_s.wheel_clutch_axis, -1, 14);
+    ImGui::SliderInt("D-pad base index", &g_s.wheel_dpad_base, -1, 520);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The four directions are consecutive from here:\n"
+                          "base+0 Left, +1 Up, +2 Right, +3 Down. 272 on a G923.");
+    for (int i = 0; i < 4; i++) {
+        char lbl[32];
+        snprintf(lbl, sizeof(lbl), "Button %d index", i + 1);
+        ImGui::SliderInt(lbl, &g_s.wheel_btn_index[i], -1, 520);
+        snprintf(lbl, sizeof(lbl), "Button %d does", i + 1);
+        ImGui::Combo(lbl, &g_s.wheel_btn_action[i],
+                     "Boost\0Slide\0Look back\0Confirm\0Back / pause\0Repair\0Camera\0");
+    }
     ImGui::Combo("Clutch does", &g_s.wheel_clutch_action, "Slide\0Boost\0Look back\0");
     if (ImGui::Button("Recalibrate wheel and pedals")) {
         g_wheel_recal++;
