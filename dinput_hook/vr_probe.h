@@ -170,6 +170,8 @@ void vr_haptic_event(float amplitude, float duration_ms);
 // reach the pod unless the profile binds them.
 // Master switch. Every other wheel accessor reports 'off' when this is 0.
 int vr_wheel_enabled(void);
+// Restore the wheel's centring spring, which DirectInput disables on acquisition.
+int vr_wheel_autocenter(void);
 int vr_wheel_steer_axis(void);
 int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
 float vr_wheel_deadzone(void);
