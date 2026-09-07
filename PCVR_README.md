@@ -85,6 +85,38 @@ weight from the parked OpenVR backend and can be deleted.
 | Left menu | Pause / **Back** |
 | **Both grips together** | **Recentre the 2D panel** |
 
+### Steering wheels (experimental)
+
+A wheel is detected automatically and needs no setup: the mod asks Windows what each
+attached device is, so a wheel switches wheel support on and a gamepad does not. Everything
+below is remappable under **Input** in the F5 panel.
+
+| Wheel | Action |
+|---|---|
+| Rim | Steering, fully analog |
+| Pedals | Throttle and brake |
+| D-pad | Menu navigation |
+| Left / right paddle | Roll left / right |
+| A | Boost, and confirm in menus |
+| B | Back / pause |
+| LB | Charge boost (hold) |
+| RB | Boost |
+| X / Y | Look back / repair |
+| + / - | Camera / slide |
+
+The defaults are a Logitech G923 map, measured on one. Another wheel reports different
+numbers, so use **Input > Wheel** to set them: turn or press a control and the panel lists
+whichever axis or button moved.
+
+**Calibrate before racing.** Hold the wheel straight, press *Recalibrate wheel and pedals*,
+then turn lock to lock and floor each pedal. The moment you press it, wherever the wheel is
+sitting becomes centre, so it only matters that it is straight then.
+
+**Two settings on the wheel itself are worth more than anything in the mod.** In Logitech G
+HUB, turn on *Centering Spring in Non Force Feedback Games* (this game never drives force
+feedback, so without it the wheel goes slack), and drop *Operating Range* from 900 degrees to
+around 240 - a podracer wants a quick input, and a shorter range gives far finer control.
+
 **Either thumbstick navigates menus**, in both directions. Keyboard continues to work
 alongside the controllers.
 
@@ -164,8 +196,17 @@ through walls, so you may see slightly fewer of them than the flat game shows.
 submission in a single-threaded 1999 engine, rendered twice for stereo - not your GPU. If the
 variance bothers you, running the headset at 72 Hz gives a rock-solid rate.
 
-**Analog steering is experimental.** Steering is digital by default (thumbstick past a threshold acts
-as an arrow key). The analog path exists behind a toggle but is unproven.
+**Some wheel buttons cannot be reached.** On a G923, Start, Back and the clutch pedal are not
+exposed to DirectInput at all - not by the game, and not by reading the device directly - so
+nothing here can bind them. If you want them, bind a keystroke to them in your wheel's own
+software: Escape on Start gives you pause.
+
+**Wheel support is new and has been tested on exactly one wheel.** It should adapt to others,
+since every axis and button is a setting, but expect to set the numbers yourself.
+
+**Steering is fully analog.** Small stick or wheel movements give small turns. Earlier
+releases thresholded the stick into arrow-key presses, which felt like a dead zone
+followed by full lock; that is fixed.
 
 **Physics is framerate-coupled.** The engine advances its simulation with the frame rate, which is
 why the community traditionally caps it at 24-30 fps. Higher rates work but change handling; if the
