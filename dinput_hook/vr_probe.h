@@ -185,8 +185,8 @@ int vr_wheel_clutch_axis(void);
 int vr_wheel_clutch_action(void);
 // D-pad directions are consecutive from this index: +0 Left, +1 Up, +2 Right, +3 Down.
 int vr_wheel_dpad_base(void);
-// Four assignable buttons. Action: 0 Boost, 1 Slide, 2 Look back, 3 Confirm,
-// 4 Back/pause, 5 Repair, 6 Camera.
+// Six assignable buttons. Action: 0 Boost, 1 Slide, 2 Look back, 3 Confirm,
+// 4 Back/pause, 5 Repair, 6 Camera, 7 Charge boost (the hold-up-to-charge input).
 int vr_wheel_btn_index(int slot);
 int vr_wheel_btn_action(int slot);
 // Changes when the user asks for recalibration; the input layer forgets its learned
