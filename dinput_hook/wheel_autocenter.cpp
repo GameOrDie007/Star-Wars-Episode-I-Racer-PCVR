@@ -195,36 +195,52 @@ struct WheelState {
     BYTE button[32];
 };
 
-// A data format with NULL object GUIDs and ANYINSTANCE: DirectInput fills these in
-// device order, which is exactly what is wanted here -- every axis and button it
-// has, whatever it chooses to call them. Writing into OUR struct, so there is no
-// game buffer to overrun.
+// Object GUIDs, defined locally so no import is added. Values copied from dinput.h.
+const GUID kGuidXAxis  = {0xA36D02E0, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidYAxis  = {0xA36D02E1, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidZAxis  = {0xA36D02E2, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidRxAxis = {0xA36D02F4, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidRyAxis = {0xA36D02F5, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidRzAxis = {0xA36D02E3, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidSlider = {0xA36D02E4, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+const GUID kGuidPOV    = {0xA36D02F2, 0xC9F3, 0x11CF, {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0, 0}};
+
 DIOBJECTDATAFORMAT g_objFmt[8 + 4 + 32];
 DIDATAFORMAT g_fmt;
 bool g_fmtReady = false;
 
+// Each object is named explicitly. The previous format asked for "any object" forty-four
+// times over with nothing to tell the entries apart, and DirectInput rejected it outright.
+// An entry with no matching object on the device is left at zero rather than failing.
 void build_format() {
     if (g_fmtReady)
         return;
+    const GUID *axisGuid[8] = {&kGuidXAxis,  &kGuidYAxis,  &kGuidZAxis,  &kGuidRxAxis,
+                               &kGuidRyAxis, &kGuidRzAxis, &kGuidSlider, &kGuidSlider};
     int n = 0;
     for (int i = 0; i < 8; i++) {
-        g_objFmt[n].pguid = NULL;
+        g_objFmt[n].pguid = axisGuid[i];
         g_objFmt[n].dwOfs = (DWORD) (i * sizeof(LONG));
-        g_objFmt[n].dwType = DIDFT_AXIS | DIDFT_ANYINSTANCE;
-        g_objFmt[n].dwFlags = 0;
+        // The two sliders are the only pair sharing a GUID, so they are the only entries
+        // needing an instance number to tell them apart.
+        g_objFmt[n].dwType =
+            DIDFT_AXIS | (i >= 6 ? DIDFT_MAKEINSTANCE(i - 6) : (DWORD) DIDFT_ANYINSTANCE);
+        g_objFmt[n].dwFlags = DIDOI_ASPECTPOSITION;
         n++;
     }
     for (int i = 0; i < 4; i++) {
-        g_objFmt[n].pguid = NULL;
+        g_objFmt[n].pguid = &kGuidPOV;
         g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, pov) + i * sizeof(DWORD));
-        g_objFmt[n].dwType = DIDFT_POV | DIDFT_ANYINSTANCE;
+        g_objFmt[n].dwType = DIDFT_POV | DIDFT_MAKEINSTANCE(i);
         g_objFmt[n].dwFlags = 0;
         n++;
     }
     for (int i = 0; i < 32; i++) {
+        // Buttons by instance, not by GUID: that is what fixes the order, and it is how the
+        // device's own numbering reaches us intact rather than through the game's 16-slot map.
         g_objFmt[n].pguid = NULL;
         g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, button) + i);
-        g_objFmt[n].dwType = DIDFT_BUTTON | DIDFT_ANYINSTANCE;
+        g_objFmt[n].dwType = DIDFT_BUTTON | DIDFT_MAKEINSTANCE(i);
         g_objFmt[n].dwFlags = 0;
         n++;
     }
