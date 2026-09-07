@@ -2241,6 +2241,11 @@ static void panel_input_diagnostics() {
         ImGui::TextDisabled("In-race steering reads DirectInput, not XInput.");
     }
 #endif
+
+    // Wheel and pedal mapping. It belongs with the other input, not in the VR panel, and it
+    // works with no headset at all. Implemented in vr_openxr.cpp only because every setting it
+    // touches lives in that file's settings struct.
+    vr_draw_wheel_settings();
 }
 
 // Cheats. The toggles are held in these flags; apply_cheats() enforces them every
@@ -2510,9 +2515,11 @@ static DebugPanel g_panel_pod_transforms = {
 static DebugPanel g_panel_pod_readout = {
     .category = "Inspect", .name = "Pod Readout", .draw = panel_pod_readout, .dev_only = true};
 static DebugPanel g_panel_vr_probe = {
-    .category = "VR", .name = "OpenVR Probe", .draw = vr_probe_draw_imgui, .dev_only = false};
+    .category = "VR", .name = "VR", .draw = vr_probe_draw_imgui, .dev_only = false};
 
 static void register_builtin_debug_panels() {
+    // VR first: it is this mod's own panel and the reason anyone opens this menu.
+    debug_ui_register(&g_panel_vr_probe);
     debug_ui_register(&g_panel_fps);
     debug_ui_register(&g_panel_graphics_settings);
     debug_ui_register(&g_panel_hd_models);
@@ -2527,5 +2534,4 @@ static void register_builtin_debug_panels() {
     debug_ui_register(&g_panel_textures);
     debug_ui_register(&g_panel_pod_transforms);
     debug_ui_register(&g_panel_pod_readout);
-    debug_ui_register(&g_panel_vr_probe);
 }
