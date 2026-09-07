@@ -18,7 +18,7 @@ extern FILE* hook_log;
 
 #include "../hook_helper.h"
 #include "../imgui_utils.h"// imgui_state: mp_disable_collision + "Game" panel cutscene toggles
-#include "../vr_probe.h"   // vr_haptic_impact (Touch controller vibration on pod impacts)
+#include "../vr_probe.h"   // vr_haptic_impact, wheel-steering settings
 #include "swrModel_delta.h"// swrModel_LoadFromId_delta (loads dust models through the GL path)
 
 // The pod's cockpit->engine cables (partNodes[10] and [11]) are bent into a curve each
@@ -316,6 +316,12 @@ float g_vr_analog_pitch = 0.0f;
 int g_vr_analog_active = 0;
 }
 
+// Live DirectInput axis values, for the wheel-axis picker in the F5 panel. Defined here
+// because this file already includes globals.h; vr_openxr.cpp does not.
+extern "C" int vr_raw_axis(int i) {
+    return (i >= 0 && i < 15) ? stdControl_aAxisPos[i] : 0;
+}
+
 void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
     if (player != nullptr && imgui_state.cheats_enabled &&
         (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
@@ -336,6 +342,43 @@ void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
     //
     // The GLOBAL is written rather than the local steerInput so the game's own
     // invert-steering option still applies -- the retail code negates it itself.
+    // Wheel / joystick steering, applied BEFORE the VR stick so that the stick still wins
+    // when it is actually being pushed. A player with both can use either without a mode
+    // switch: at rest each one yields to the other.
+    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
+        const int ax = vr_wheel_steer_axis();
+        if (ax >= 0 && ax < 15) {
+            const int raw = stdControl_aAxisPos[ax];
+            int range = vr_wheel_range();
+            if (range <= 0) {
+                // Auto-calibrate: scale to the largest magnitude seen so far. One full
+                // turn each way sets it, and it can only widen, so it never clips.
+                static int seen_max = 0;
+                const int mag = raw < 0 ? -raw : raw;
+                if (mag > seen_max)
+                    seen_max = mag;
+                range = seen_max;
+            }
+            if (range > 0) {
+                float w = (float) raw / (float) range;
+                if (w > 1.0f)
+                    w = 1.0f;
+                else if (w < -1.0f)
+                    w = -1.0f;
+                const float dz = vr_wheel_deadzone();
+                if (w > dz || w < -dz) {
+                    swrRace_SteeringInput = vr_wheel_invert() ? -w : w;
+                    static int wheel_logged = 0;
+                    if (!wheel_logged) {
+                        wheel_logged = 1;
+                        fprintf(hook_log, "[wheel] axis %d LIVE: raw=%d range=%d -> steer=%.3f\n",
+                                ax, raw, range, swrRace_SteeringInput);
+                        fflush(hook_log);
+                    }
+                }
+            }
+        }
+    }
     if (player != nullptr && g_vr_analog_active != 0 &&
         (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
         if (g_vr_analog_steer > 0.02f || g_vr_analog_steer < -0.02f)

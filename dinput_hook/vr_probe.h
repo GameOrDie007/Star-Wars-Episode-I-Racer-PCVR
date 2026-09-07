@@ -164,6 +164,17 @@ void vr_haptic_wall(float push);
 void vr_haptic_event(float amplitude, float duration_ms);
 
 
+// Wheel / joystick steering, read straight from a raw DirectInput axis and applied at the
+// same point as the VR stick. -1 disables. Bypasses the game's own axis binding, which is
+// the step a wheel appears to fall down on: the axes reach stdControl_aAxisPos, but do not
+// reach the pod unless the profile binds them.
+int vr_wheel_steer_axis(void);
+int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
+float vr_wheel_deadzone(void);
+int vr_wheel_invert(void);
+// One raw DirectInput axis (0..14), for the axis picker. Returns 0 out of range.
+int vr_raw_axis(int i);
+
 // Non-zero to put the game into joystick mode and drive it from the thumbstick as a real
 // analog axis, instead of thresholding the stick into arrow-key presses. Quest controllers
 // are not gamepads to Windows -- no XInput or DirectInput device exists for them -- so the
