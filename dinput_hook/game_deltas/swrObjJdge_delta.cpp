@@ -242,6 +242,38 @@ static void vr_menu_key(int vk, bool down, int slot) {
 void stdControl_ReadControls_boostfix_delta(void) {
     hook_call_original((stdControl_ReadControls_t) stdControl_ReadControls_ADDR);
 
+    // Axis activity scan. Logs each DirectInput axis the first time it moves, once per
+    // axis, so one session identifies which slot a wheel or pedal set lands on. Runs in
+    // menus as well as races, and is independent of any wheel setting -- a diagnostic
+    // gated behind the feature it diagnoses is useless.
+    {
+        static int axis_rest[15];
+        static int axis_have_rest = 0;
+        static int axis_logged[15];
+        if (!axis_have_rest) {
+            // First frame is taken as the resting position, so a centred axis sitting at a
+            // non-zero value does not read as movement forever.
+            axis_have_rest = 1;
+            for (int i = 0; i < 15; i++) {
+                axis_rest[i] = stdControl_aAxisPos[i];
+                axis_logged[i] = 0;
+            }
+        }
+        for (int i = 0; i < 15; i++) {
+            if (axis_logged[i])
+                continue;
+            const int d = stdControl_aAxisPos[i] - axis_rest[i];
+            const int mag = d < 0 ? -d : d;
+            if (mag > 3000) {
+                axis_logged[i] = 1;
+                fprintf(hook_log,
+                        "[axis] axis %d MOVED: rest=%d now=%d delta=%d\n",
+                        i, axis_rest[i], stdControl_aAxisPos[i], d);
+                fflush(hook_log);
+            }
+        }
+    }
+
 
     // Fold the Quest controllers in on top of the keyboard, never replacing it: the arrays
     // were just refilled by the original, so anything set here is what the game reads this
