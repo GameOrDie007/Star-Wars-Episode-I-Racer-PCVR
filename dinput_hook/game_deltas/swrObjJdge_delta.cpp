@@ -268,6 +268,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // whichever ran second would clear the other's press the same frame.
     bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
     bool wbtn[8] = {};// indexed by action id
+    bool wped[3] = {};// throttle, brake, clutch -- OR-ed in below, never injected directly
     {
         // A control that rests in the DOWN state would otherwise be held forever. The pedals
         // already rest at full deflection on their axes, so this is not hypothetical -- and a
@@ -342,13 +343,8 @@ void stdControl_ReadControls_boostfix_delta(void) {
             }
         }
         const float thr = vr_wheel_pedal_threshold();
-        static const int clutch_keys[3] = {VRK_SLIDE, VRK_BOOST, VRK_LOOKBACK};
-        int ca = vr_wheel_clutch_action();
-        if (ca < 0 || ca > 2)
-            ca = 0;
         const int pedals[3] = {vr_wheel_throttle_axis(), vr_wheel_brake_axis(),
                                vr_wheel_clutch_axis()};
-        const int keys[3] = {VRK_ACCEL, VRK_BRAKE, clutch_keys[ca]};
         for (int k = 0; k < 3; k++) {
             const int a = pedals[k];
             if (a < 0 || a >= 15)
@@ -363,7 +359,12 @@ void stdControl_ReadControls_boostfix_delta(void) {
                 continue;// not pressed far enough yet to know the travel
             // Rest is the HIGH end and pressing falls towards the low end, so invert.
             const float t = (float) (p_hi[a] - raw) / (float) span;
-            vr_hold_key(keys[k], t > thr);
+            // Recorded, NOT injected here. Injecting directly meant the VR block's own
+            // throttle call ran afterwards with the trigger released and cleared it --
+            // one was[] per scancode, so the last caller wins. Pedals therefore worked
+            // flat and did nothing in a headset.
+            if (t > thr)
+                wped[k] = true;
             static int pedal_logged[3] = {0, 0, 0};
             static const char *pedal_name[3] = {"THROTTLE", "BRAKE", "CLUTCH"};
             if (!pedal_logged[k] && t > thr) {
@@ -404,6 +405,16 @@ void stdControl_ReadControls_boostfix_delta(void) {
                     break;
             }
         }
+    }
+
+    // The clutch drives whichever action it is assigned, through the same OR path the
+    // buttons use rather than a direct injection of its own.
+    if (wped[2]) {
+        int ca = vr_wheel_clutch_action();
+        if (ca < 0 || ca > 2)
+            ca = 0;
+        static const int clutch_action_id[3] = {1, 0, 2};// Slide, Boost, Look back
+        wbtn[clutch_action_id[ca]] = true;
     }
 
     // Axis activity scan. Logs each DirectInput axis the first time it moves, once per
@@ -544,8 +555,8 @@ void stdControl_ReadControls_boostfix_delta(void) {
         const float ly = vr_input_stick_y();
         const float ry = vr_input_pitch();
         const float pitch = (fabsf(ly) > fabsf(ry)) ? ly : ry;
-        vr_hold_key(VRK_ACCEL, vr_input_throttle() > 0.15f);
-        vr_hold_key(VRK_BRAKE, vr_input_brake() > 0.15f);
+        vr_hold_key(VRK_ACCEL, vr_input_throttle() > 0.15f || wped[0]);
+        vr_hold_key(VRK_BRAKE, vr_input_brake() > 0.15f || wped[1]);
         // With analog on, the stick drives the axis; keep the key path off so the two do not
         // fight each other.
         // NEVER gate these on analog. They are not only steering -- the hub and the pause
@@ -631,6 +642,8 @@ void stdControl_ReadControls_boostfix_delta(void) {
     // usable without a headset. Same keys and the same menu-event slots, so nothing can
     // double-drive a scancode -- only one of the two branches ever executes.
     if (!vr_input_available()) {
+        vr_hold_key(VRK_ACCEL, wped[0]);
+        vr_hold_key(VRK_BRAKE, wped[1]);
         vr_hold_key(VRK_LEFT, wdp_l);
         vr_hold_key(VRK_RIGHT, wdp_r);
         vr_hold_key(VRK_NOSEDOWN, wdp_u || wbtn[7]);
