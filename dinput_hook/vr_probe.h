@@ -168,6 +168,8 @@ void vr_haptic_event(float amplitude, float duration_ms);
 // same point as the VR stick. -1 disables. Bypasses the game's own axis binding, which is
 // the step a wheel appears to fall down on: the axes reach stdControl_aAxisPos, but do not
 // reach the pod unless the profile binds them.
+// Master switch. Every other wheel accessor reports 'off' when this is 0.
+int vr_wheel_enabled(void);
 int vr_wheel_steer_axis(void);
 int vr_wheel_range(void);    // raw counts at full lock; 0 = auto-calibrate from the peak
 float vr_wheel_deadzone(void);
