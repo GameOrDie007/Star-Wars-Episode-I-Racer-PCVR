@@ -260,6 +260,31 @@ void stdControl_ReadControls_boostfix_delta(void) {
         swrConfig_joystick_enabled = 0;
     }
 
+    // Wheel D-pad and buttons. Read here, before the VR block, so their state can be
+    // OR-ed into the same vr_hold_key / vr_menu_key calls the sticks use. Two independent
+    // callers for one scancode would fight -- vr_hold_key keeps a single was[] per key, so
+    // whichever ran second would clear the other's press the same frame.
+    bool wdp_l = false, wdp_u = false, wdp_r = false, wdp_d = false;
+    bool wbtn[7] = {};// indexed by action id
+    {
+        const int base = vr_wheel_dpad_base();
+        if (base >= 0 && base + 3 < 528) {
+            wdp_l = stdControl_aKeyInfos[base + 0] != 0;
+            wdp_u = stdControl_aKeyInfos[base + 1] != 0;
+            wdp_r = stdControl_aKeyInfos[base + 2] != 0;
+            wdp_d = stdControl_aKeyInfos[base + 3] != 0;
+        }
+        for (int s = 0; s < 4; s++) {
+            const int bi = vr_wheel_btn_index(s);
+            if (bi < 0 || bi >= 528 || stdControl_aKeyInfos[bi] == 0)
+                continue;
+            int act = vr_wheel_btn_action(s);
+            if (act < 0 || act > 6)
+                act = 0;
+            wbtn[act] = true;
+        }
+    }
+
     // Wheel pedals -> the same scancodes the VR triggers use. Deliberately outside the
     // vr_input_available() guard: a wheel works flat as well as in a headset.
     {
@@ -494,11 +519,11 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // NEVER gate these on analog. They are not only steering -- the hub and the pause
         // menu navigate from these same arrow scancodes, so suppressing them removed all
         // menu control as well as steering. Reported as 'no control anywhere'.
-        vr_hold_key(VRK_LEFT, steer < -deadzone);
-        vr_hold_key(VRK_RIGHT, steer > deadzone);
+        vr_hold_key(VRK_LEFT, steer < -deadzone || wdp_l);
+        vr_hold_key(VRK_RIGHT, steer > deadzone || wdp_r);
         // Right stick pitches the pod. Up on the stick = nose down, matching the arrow keys.
-        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone);
-        vr_hold_key(VRK_PULLUP, pitch < -deadzone);
+        vr_hold_key(VRK_NOSEDOWN, pitch > deadzone || wdp_u);
+        vr_hold_key(VRK_PULLUP, pitch < -deadzone || wdp_d);
         // A short kick when boost engages. The same button confirms menu selections, so it
         // is keyed off the throttle rather than off any context test: you cannot be on the
         // throttle in a menu, and that needs nothing the game refuses to tell us.
@@ -509,7 +534,7 @@ void stdControl_ReadControls_boostfix_delta(void) {
                 vr_haptic_event(0.55f, 120.0f);
             boost_was = boost_now;
         }
-        vr_hold_key(VRK_BOOST, vr_input_boost() != 0);
+        vr_hold_key(VRK_BOOST, vr_input_boost() != 0 || wbtn[0]);
         // B is Back/Cancel EVERYWHERE, with no context test. During a race that means
         // pause, which is what a Back button should do there and what console players
         // expect. Two attempts at splitting B by context both failed -- see the note on
@@ -518,19 +543,19 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // Slide on the right thumbstick click, Look Back on X. Look Back is NOT redundant
         // in a headset, which was the assumption when it was dropped: seated in an ordinary
         // chair you cannot turn far enough to see behind you.
-        vr_hold_key(VRK_SLIDE, vr_input_slide() != 0);
-        vr_hold_key(VRK_LOOKBACK, vr_input_lookback() != 0);
-        vr_hold_key(VRK_VIEW, vr_input_view() != 0);
+        vr_hold_key(VRK_SLIDE, vr_input_slide() != 0 || wbtn[1]);
+        vr_hold_key(VRK_LOOKBACK, vr_input_lookback() != 0 || wbtn[2]);
+        vr_hold_key(VRK_VIEW, vr_input_view() != 0 || wbtn[6]);
         // Repair is right-stick-down. It shares that direction with pull-up, which is fine:
         // holding repair while climbing is a legitimate thing to want mid-race.
-        vr_hold_key(VRK_REPAIR, vr_input_repair() != 0);
+        vr_hold_key(VRK_REPAIR, vr_input_repair() != 0 || wbtn[5]);
         vr_hold_key(VRK_ROLLL, vr_input_roll_left() != 0);
         vr_hold_key(VRK_ROLLR, vr_input_roll_right() != 0);
         // Menu confirm/cancel ride the same buttons; the front end uses the event path below,
         // and these scancodes mean nothing to it, so the two cannot collide.
-        vr_hold_key(VRK_ENTER, vr_input_boost() != 0);
+        vr_hold_key(VRK_ENTER, vr_input_boost() != 0 || wbtn[3]);
         // Escape from either button, unconditionally.
-        vr_hold_key(VRK_ESC, vr_input_menu() != 0 || cancel_btn);
+        vr_hold_key(VRK_ESC, vr_input_menu() != 0 || cancel_btn || wbtn[4]);
 
         // Same intent again, as events, for the front-end menus.
         //
@@ -541,12 +566,12 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // 'trouble moving the selection to where I wanted'.
         const float menu_x = (fabsf(steer) > fabsf(vr_input_pitch_x())) ? steer
                                                                        : vr_input_pitch_x();
-        vr_menu_key(VRVK_UP, pitch > deadzone, 0);
-        vr_menu_key(VRVK_DOWN, pitch < -deadzone, 1);
-        vr_menu_key(VRVK_LEFT, menu_x < -deadzone, 2);
-        vr_menu_key(VRVK_RIGHT, menu_x > deadzone, 3);
-        vr_menu_key(VRVK_RETURN, vr_input_boost() != 0, 4);
-        vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0, 5);
+        vr_menu_key(VRVK_UP, pitch > deadzone || wdp_u, 0);
+        vr_menu_key(VRVK_DOWN, pitch < -deadzone || wdp_d, 1);
+        vr_menu_key(VRVK_LEFT, menu_x < -deadzone || wdp_l, 2);
+        vr_menu_key(VRVK_RIGHT, menu_x > deadzone || wdp_r, 3);
+        vr_menu_key(VRVK_RETURN, vr_input_boost() != 0 || wbtn[3], 4);
+        vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0 || wbtn[4], 5);
 
         // The control-type byte decides whether the analog globals above are read at all,
         // and it cannot be determined from the source. Logged once, and again if it ever
@@ -568,6 +593,29 @@ void stdControl_ReadControls_boostfix_delta(void) {
             }
         }
     }
+    // Flat play: the block above only runs with VR input present, and a wheel is perfectly
+    // usable without a headset. Same keys and the same menu-event slots, so nothing can
+    // double-drive a scancode -- only one of the two branches ever executes.
+    if (!vr_input_available()) {
+        vr_hold_key(VRK_LEFT, wdp_l);
+        vr_hold_key(VRK_RIGHT, wdp_r);
+        vr_hold_key(VRK_NOSEDOWN, wdp_u);
+        vr_hold_key(VRK_PULLUP, wdp_d);
+        vr_hold_key(VRK_BOOST, wbtn[0]);
+        vr_hold_key(VRK_SLIDE, wbtn[1]);
+        vr_hold_key(VRK_LOOKBACK, wbtn[2]);
+        vr_hold_key(VRK_ENTER, wbtn[3]);
+        vr_hold_key(VRK_ESC, wbtn[4]);
+        vr_hold_key(VRK_REPAIR, wbtn[5]);
+        vr_hold_key(VRK_VIEW, wbtn[6]);
+        vr_menu_key(VRVK_UP, wdp_u, 0);
+        vr_menu_key(VRVK_DOWN, wdp_d, 1);
+        vr_menu_key(VRVK_LEFT, wdp_l, 2);
+        vr_menu_key(VRVK_RIGHT, wdp_r, 3);
+        vr_menu_key(VRVK_RETURN, wbtn[3], 4);
+        vr_menu_key(VRVK_ESCAPE, wbtn[4], 5);
+    }
+
     if (g_suppress_enter) {
         if (stdControl_aKeyInfos[DIK_RETURN_KEY] != 0)
             stdControl_aKeyInfos[DIK_RETURN_KEY] = 0;// still held from the restart -> hide it
