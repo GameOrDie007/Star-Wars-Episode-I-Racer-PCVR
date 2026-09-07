@@ -22,7 +22,6 @@ extern "C" {
 extern FILE* hook_log;
 // Captured in swrRace_delta.cpp from the collision hook, which already runs per physics
 // step and already receives the local pod.
-extern swrRace* g_vr_local_player;
 // Analog steering override, consumed in swrRace_UpdatePlayerControl at the moment the
 // value is read. Defined in src/Swr/swrRace.c, which is C.
 extern "C" float g_vr_analog_steer;
@@ -733,25 +732,15 @@ void stdControl_ReadControls_boostfix_delta(void) {
         vr_menu_key(VRVK_RETURN, vr_input_boost() != 0 || wbtn[3] || wbtn[10], 4);
         vr_menu_key(VRVK_ESCAPE, cancel_btn || vr_input_menu() != 0 || wbtn[4], 5);
 
-        // The control-type byte decides whether the analog globals above are read at all,
-        // and it cannot be determined from the source. Logged once, and again if it ever
-        // changes, so a single session settles whether it needs forcing.
-        if (g_vr_local_player != nullptr && g_vr_local_player->score_ptr != nullptr &&
-            g_vr_local_player->score_ptr->localPlayerProfile != nullptr) {
-            const int ct =
-                *((int8_t*) g_vr_local_player->score_ptr->localPlayerProfile + 0x23);
-            static int last_ct = -999;
-            if (ct != last_ct) {
-                last_ct = ct;
-                fprintf(hook_log,
-                        "[analog] controlType=%d (%s)  analog_toggle=%d  steerGlobal=%.3f\n",
-                        ct,
-                        (ct == 0 || ct == 9) ? "ANALOG branch - globals are read"
-                                             : "DIGITAL branch - globals IGNORED",
-                        (int) analog, swrRace_SteeringInput);
-                fflush(hook_log);
-            }
-        }
+        // A control-type debug print lived here and crashed the game at the end of every
+        // race for one player in v1.2. It read the local player's swrRace, which the game
+        // frees when the race ends -- the pointer stayed non-null, so the null guards
+        // passed and it dereferenced freed memory. Whether that faulted depended on what
+        // the allocator had put there, which is why it was every race for one person and
+        // never for another on the identical build.
+        //
+        // Nothing here may reach for a game object that outlives its owner. This hook runs
+        // in menus and results screens too, not only during a race.
     }
     // Flat play: the block above only runs with VR input present, and a wheel is perfectly
     // usable without a headset. Same keys and the same menu-event slots, so nothing can
