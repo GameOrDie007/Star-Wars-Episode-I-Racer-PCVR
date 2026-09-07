@@ -44,12 +44,17 @@ typedef HRESULT(__stdcall *CreateDevice_t)(void *self, const GUID *rguid, void *
 typedef HRESULT(__stdcall *Acquire_t)(void *self);
 typedef HRESULT(__stdcall *SetProperty_t)(void *self, const GUID *rguidProp,
                                           const DIPROPHEADER *pdiph);
+typedef HRESULT(__stdcall *GetDeviceInfo_t)(void *self, DIDEVICEINSTANCEA *pdidi);
 
 // IDirectInputA vtable: 0 QueryInterface, 1 AddRef, 2 Release, 3 CreateDevice.
 const int kSlotCreateDevice = 3;
 // IDirectInputDeviceA vtable: ... 5 GetProperty, 6 SetProperty, 7 Acquire.
 const int kSlotSetProperty = 6;
 const int kSlotAcquire = 7;
+const int kSlotGetDeviceInfo = 15;
+
+// Set once a device identifying itself as a wheel has been created.
+bool g_wheelDevicePresent = false;
 
 CreateDevice_t g_origCreateDevice = nullptr;
 Acquire_t g_origAcquire = nullptr;
@@ -121,18 +126,57 @@ HRESULT __stdcall Acquire_hook(void *dev) {
     return hr;
 }
 
+// A wheel identifies itself. Axis values never could: a pad's left stick is axis 0, the same
+// axis a wheel's rim reports on, which is why watching for movement was hopeless.
+void note_device_type(void *dev) {
+    void **vtbl = *(void ***) dev;
+    GetDeviceInfo_t getInfo = (GetDeviceInfo_t) vtbl[kSlotGetDeviceInfo];
+
+    DIDEVICEINSTANCEA info;
+    ZeroMemory(&info, sizeof(info));
+    info.dwSize = sizeof(DIDEVICEINSTANCEA);
+    HRESULT hr = getInfo(dev, &info);
+    if (FAILED(hr)) {
+        // The game may have created the interface at an older DirectInput version, which
+        // validates dwSize against its own smaller structure.
+        ZeroMemory(&info, sizeof(info));
+        info.dwSize = sizeof(DIDEVICEINSTANCE_DX3A);
+        hr = getInfo(dev, &info);
+    }
+    if (FAILED(hr))
+        return;
+
+    const BYTE type = (BYTE) (info.dwDevType & 0xFF);
+    const BYTE subtype = (BYTE) ((info.dwDevType >> 8) & 0xFF);
+    // 0x14 is DI8DEVTYPE_DRIVING; on older interfaces a wheel is a joystick with subtype
+    // WHEEL. Accept either, since which appears depends on the version the game asked for.
+    const bool isWheel =
+        (type == 0x14) || (type == DIDEVTYPE_JOYSTICK && subtype == DIDEVTYPEJOYSTICK_WHEEL);
+    if (isWheel && !g_wheelDevicePresent) {
+        g_wheelDevicePresent = true;
+        logf_once("[wheel] driving device detected: '%s' (devType=0x%08lx)\n",
+                  info.tszProductName, (unsigned long) info.dwDevType);
+    }
+}
+
 HRESULT __stdcall CreateDevice_hook(void *self, const GUID *rguid, void **ppDevice,
                                     void *punkOuter) {
     const HRESULT hr =
         g_origCreateDevice ? g_origCreateDevice(self, rguid, ppDevice, punkOuter) : E_FAIL;
-    if (SUCCEEDED(hr) && ppDevice != nullptr && *ppDevice != nullptr)
+    if (SUCCEEDED(hr) && ppDevice != nullptr && *ppDevice != nullptr) {
+        note_device_type(*ppDevice);
         patch_slot(*ppDevice, kSlotAcquire, (void *) &Acquire_hook, (void **) &g_origAcquire);
+    }
     return hr;
 }
 
 }// namespace
 
 // Called from the dinput proxy once the real DirectInput object exists.
+extern "C" int vr_wheel_device_present(void) {
+    return g_wheelDevicePresent ? 1 : 0;
+}
+
 extern "C" void wheel_autocenter_install(void *pDI) {
     static bool installed = false;
     if (installed || pDI == nullptr)
