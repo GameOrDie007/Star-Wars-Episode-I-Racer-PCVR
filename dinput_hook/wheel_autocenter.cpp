@@ -209,9 +209,13 @@ DIOBJECTDATAFORMAT g_objFmt[8 + 4 + 32];
 DIDATAFORMAT g_fmt;
 bool g_fmtReady = false;
 
-// Each object is named explicitly. The previous format asked for "any object" forty-four
-// times over with nothing to tell the entries apart, and DirectInput rejected it outright.
-// An entry with no matching object on the device is left at zero rather than failing.
+// Each object is named explicitly, and every one is marked DIDFT_OPTIONAL.
+//
+// OPTIONAL is the part that matters: without it EVERY object in the format must exist on
+// the device, and this format asks for 8 axes, 4 POVs and 32 buttons while the wheel has 4,
+// 1 and 23. The unmatched entries failed the whole call with E_INVALIDARG. The stock
+// joystick formats mark every entry optional for exactly this reason -- one format has to
+// serve devices of every shape.
 void build_format() {
     if (g_fmtReady)
         return;
@@ -223,15 +227,15 @@ void build_format() {
         g_objFmt[n].dwOfs = (DWORD) (i * sizeof(LONG));
         // The two sliders are the only pair sharing a GUID, so they are the only entries
         // needing an instance number to tell them apart.
-        g_objFmt[n].dwType =
-            DIDFT_AXIS | (i >= 6 ? DIDFT_MAKEINSTANCE(i - 6) : (DWORD) DIDFT_ANYINSTANCE);
+        g_objFmt[n].dwType = DIDFT_AXIS | DIDFT_OPTIONAL |
+                             (i >= 6 ? DIDFT_MAKEINSTANCE(i - 6) : (DWORD) DIDFT_ANYINSTANCE);
         g_objFmt[n].dwFlags = DIDOI_ASPECTPOSITION;
         n++;
     }
     for (int i = 0; i < 4; i++) {
         g_objFmt[n].pguid = &kGuidPOV;
         g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, pov) + i * sizeof(DWORD));
-        g_objFmt[n].dwType = DIDFT_POV | DIDFT_MAKEINSTANCE(i);
+        g_objFmt[n].dwType = DIDFT_POV | DIDFT_OPTIONAL | DIDFT_MAKEINSTANCE(i);
         g_objFmt[n].dwFlags = 0;
         n++;
     }
@@ -240,7 +244,7 @@ void build_format() {
         // device's own numbering reaches us intact rather than through the game's 16-slot map.
         g_objFmt[n].pguid = NULL;
         g_objFmt[n].dwOfs = (DWORD) (offsetof(WheelState, button) + i);
-        g_objFmt[n].dwType = DIDFT_BUTTON | DIDFT_MAKEINSTANCE(i);
+        g_objFmt[n].dwType = DIDFT_BUTTON | DIDFT_OPTIONAL | DIDFT_MAKEINSTANCE(i);
         g_objFmt[n].dwFlags = 0;
         n++;
     }
