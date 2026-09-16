@@ -524,6 +524,33 @@ int Window_Main_delta(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLin
     Window_SetHINSTANCE(hInstance);
     Window_SetGUID((GUID *) Window_UUID);
 
+    // Declare this process DPI-UNAWARE before GLFW declares it aware.
+    //
+    // This is the ONE addition to the v1.3 behaviour, and it exists to reproduce it rather than
+    // change it. In v1.3 this machine's window was 2560x1440 and it held 90 fps. On a display at
+    // 150% scaling a DPI-AWARE process gets the monitor's PHYSICAL 3840x2160 instead -- 2.25x the
+    // pixels, through the window, the render target and everything that paints the mirror. That
+    // was worth about 20 fps here.
+    //
+    // It used to be supplied by ticking "Override high DPI scaling behavior" on the exe, a
+    // per-machine checkbox no other player has. Doing it in code means every user with a scaled
+    // display gets what v1.3 gave this one.
+    //
+    // GLFW sets awareness in its platform init and first caller wins, so this must precede
+    // glfwInit(). Resolved dynamically: the API is Windows 10 1703 and later.
+    {
+        typedef BOOL(WINAPI * SetCtxFn)(HANDLE);
+        HMODULE u32 = GetModuleHandleW(L"user32.dll");
+        SetCtxFn set_ctx =
+            u32 ? (SetCtxFn) GetProcAddress(u32, "SetProcessDpiAwarenessContext") : NULL;
+        const BOOL ok = set_ctx ? set_ctx((HANDLE) -1 /* DPI_AWARENESS_CONTEXT_UNAWARE */) : FALSE;
+        if (hook_log != NULL) {
+            fprintf(hook_log, "[window] DPI unaware: %s\n",
+                    ok ? "yes" : (set_ctx ? "REFUSED (awareness already set)" : "no API"));
+            fflush(hook_log);
+        }
+    }
+
     glfwInit();
 
     {// Core compatibility for RenderDocs

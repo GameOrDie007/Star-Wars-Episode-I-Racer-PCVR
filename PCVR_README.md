@@ -133,6 +133,32 @@ the first release. It is a real button again.
 **Boost is A.** Hold the left stick forward to charge, tap A to fire it, and it sustains
 itself as long as you hold the throttle - you do not need to keep A held.
 
+## Camera views
+
+The game's own camera button cycles five views, in this order:
+
+| View | |
+|---|---|
+| **Chase** | the default, behind the pod |
+| **Cockpit** | sitting in the pod, as the pilot |
+| **Engine** | retail's first-person view, out between the engines |
+| **Bumper** | low and in front |
+| **Far chase** | pulled well back |
+
+Then back to Chase. It is the same button as the flat game - nothing new to learn, and no menu
+to go into.
+
+**Cockpit view is where VR pays off.** It puts your head where the pilot's is, so the pod's
+cables and cowling sit around you and the engines pull from ahead. Every one of the
+twenty-three pods has its own seat position, measured in a headset one racer at a time,
+because they genuinely differ - the tuned values span 1.9 game units vertically and 4.7
+front-to-back, so no single offset could sit correctly in all of them.
+
+If a seat is not quite right for you, **F5 > VR** names the racer you are flying and gives you
+*Seat up / back / right*. Your change is saved against that pod alone, and *Reset to built-in*
+puts it back. **Follow pod roll** decides how much the camera banks with the pod: 1 welds you
+to it, 0 keeps the horizon level, and lower is calmer if the rolling is uncomfortable.
+
 ## Settings
 
 **F5** opens the debug overlay. VR settings live under the **VR** section and are saved to a `[vr]`
@@ -172,6 +198,22 @@ Worth tuning:
 - **Flare size (deg)** - how wide a flare appears, in degrees. Distant lights hold their
   angular size rather than shrinking to sub-pixel, the way the original sprites did. The moon
   is about 0.5 deg across, for reference.
+
+- **Render resolution** - the fraction of your runtime's recommended per-eye resolution the game
+  actually renders. It is **not** 1.00 by default, and should not be: runtimes recommend
+  generously, and this is a 1999 engine running its whole world on one CPU thread. On the machine
+  it was tuned on, 1.00 asks for 10 megapixels an eye and lands around 60 fps, while the default
+  0.60 holds a locked 90. The panel shows the resolution each setting produces - raise it until
+  frames start dropping, then come back one notch.
+
+  This is independent of your monitor and of Windows display scaling. Earlier versions were not:
+  the desktop window's size silently decided the render resolution, so a 150%-scaled display cost
+  about 10 fps for nothing. If v1.3 ran worse for you than it should have, that was why.
+- **Desktop mirror** - whether to paint the window on your monitor: *Every frame*, *Every other
+  frame*, or *Off*. The headset never reads that window, so on a large monitor this is pure cost -
+  a 4K mirror can take a meaningful slice of the frame for a picture nobody is looking at while
+  the headset is on. Turn it down if you need frames, leave it on if someone is watching or you
+  are recording.
 
 For performance, in **Render -> Graphics Settings**: enable *Cull off-screen meshes*, disable *AI full
 LOD*, and leave the frame cap unlimited.
