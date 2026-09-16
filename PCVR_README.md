@@ -16,7 +16,7 @@ menus, and full Quest controller support - on a game with no available source, v
 |---|---|
 | **Virtual Desktop (VDXR)** | Yes - ships and registers a 32-bit runtime |
 | SteamVR | **From 2.17 onward** - earlier versions were 64-bit only. Settings > OpenXR > *Set SteamVR as OpenXR Runtime*. Confirmed working on a Rift CV1. This is the route for any tethered headset (Rift, Index, Vive, WMR), which Virtual Desktop cannot serve |
-| Meta / Oculus PC runtime | Probably - documented as supporting 32-bit apps, untested here |
+| Meta / Oculus PC runtime | **Reported not working.** It registers a 32-bit entry, but a user on a Quest with Meta's runtime got `XR_ERROR_RUNTIME_UNAVAILABLE` and no VR. If you hit this, the log now names the runtime library it was asked for and says whether that file is actually installed - paste those lines and we can tell you which it is |
 
 The game is a 32-bit executable, so the VR runtime must be too. If your active OpenXR runtime has no
 32-bit half, the game launches normally and runs flat, with the reason written to `hook.log`.

@@ -650,12 +650,88 @@ static bool g_have_32bit_runtime = false;
 // The loader reads HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime, which a 32-bit process sees
 // redirected to WOW6432Node. KEY_WOW64_32KEY asks for that view explicitly rather than relying on
 // the redirection, so the line means the same thing whoever reads it.
+// The manifest the loader will use, remembered so a failure can be explained without
+// asking the player to go and read a JSON file.
+static char g_runtime_manifest[512] = {};
+
+// Reads "library_path" out of an OpenXR runtime manifest and reports whether that DLL is
+// actually installed. A manifest naming a missing library is the most common cause of
+// XR_ERROR_RUNTIME_UNAVAILABLE, and it is invisible from the outside: the runtime looks
+// registered, the headset works in every other title, and nothing says why this one failed.
+static void report_runtime_library(const char *manifest) {
+    if (manifest == nullptr || manifest[0] == '\0')
+        return;
+    FILE *f = fopen(manifest, "rb");
+    if (f == nullptr) {
+        xr_logf("  manifest       : CANNOT BE OPENED -- the registered path does not exist");
+        return;
+    }
+    char buf[8192] = {};
+    const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[got] = '\0';
+
+    const char *k = strstr(buf, "library_path");
+    if (k == nullptr) {
+        xr_logf("  manifest       : no library_path entry -- the manifest is malformed");
+        return;
+    }
+    const char *q = strchr(k + 12, '"');// opening quote of the value
+    q = (q != nullptr) ? strchr(q + 1, '"') : nullptr;
+    if (q == nullptr) {
+        xr_logf("  manifest       : library_path is unreadable");
+        return;
+    }
+    q++;
+    char lib[512] = {};
+    size_t n = 0;
+    for (; *q != '\0' && *q != '"' && n < sizeof(lib) - 1; q++) {
+        if (*q == '\\' && *(q + 1) == '\\')// JSON escapes every backslash
+            q++;
+        lib[n++] = *q;
+    }
+    xr_logf("  runtime library: %s", lib);
+
+    // library_path may be relative to the manifest's own directory.
+    char full[1024] = {};
+    const bool absolute = (lib[1] == ':') || (lib[0] == '\\' && lib[1] == '\\');
+    if (absolute) {
+        snprintf(full, sizeof(full), "%s", lib);
+    } else {
+        snprintf(full, sizeof(full), "%s", manifest);
+        char *slash = strrchr(full, '\\');
+        char *fwd = strrchr(full, '/');
+        if (fwd != nullptr && (slash == nullptr || fwd > slash))
+            slash = fwd;
+        if (slash != nullptr)
+            *(slash + 1) = '\0';
+        else
+            full[0] = '\0';
+        strncat(full, lib, sizeof(full) - strlen(full) - 1);
+    }
+
+    const DWORD attr = GetFileAttributesA(full);
+    const bool present = (attr != INVALID_FILE_ATTRIBUTES) &&
+                         ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0);
+    xr_logf("  resolved to    : %s  -- %s", full, present ? "present" : "NOT FOUND");
+    if (!present) {
+        xr_logf("  The registered runtime names a library that is not installed, so NO 32-bit");
+        xr_logf("  app can start under it. This is a fault in that runtime's installation,");
+        xr_logf("  not in this mod, and it will affect every 32-bit OpenXR title equally.");
+    } else {
+        xr_logf("  The library exists, so the manifest is not the problem. The runtime itself");
+        xr_logf("  refused to start -- usually its service is not running, or the headset is");
+        xr_logf("  not connected. Start the headset link first, then launch the game.");
+    }
+}
+
 static void log_active_runtime(void) {
     // XR_RUNTIME_JSON overrides the registry for one process, so it has to be reported or the
     // logged value is a lie whenever anyone is testing a specific runtime.
     char env[512] = {};
     if (GetEnvironmentVariableA("XR_RUNTIME_JSON", env, sizeof(env) - 1) > 0 && env[0] != '\0') {
         xr_logf("32-bit OpenXR runtime: %s  (forced by XR_RUNTIME_JSON)", env);
+        snprintf(g_runtime_manifest, sizeof(g_runtime_manifest), "%s", env);
         g_have_32bit_runtime = true;
         return;
     }
@@ -671,6 +747,7 @@ static void log_active_runtime(void) {
         RegCloseKey(key);
         if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && path[0] != '\0') {
             xr_logf("32-bit OpenXR runtime: %s", path);
+            snprintf(g_runtime_manifest, sizeof(g_runtime_manifest), "%s", path);
             g_have_32bit_runtime = true;
             return;
         }
@@ -1077,6 +1154,11 @@ static void try_init(void) {
             set_status("OpenXR init failed - running flat (see hook.log)");
             xr_logf("VR did not start, but a 32-bit runtime IS registered (named above), so this");
             xr_logf("  is not the usual missing-runtime case. The failing call is logged above.");
+            // Answer the obvious next question here rather than making somebody open a JSON
+            // file and check for a DLL by hand.
+            report_runtime_library(g_runtime_manifest);
+            xr_logf("  Routes confirmed working: Virtual Desktop, or SteamVR 2.17+");
+            xr_logf("    (SteamVR: Settings > OpenXR > Set SteamVR as OpenXR Runtime).");
         }
         g_gave_up = true;
         return;
