@@ -2341,16 +2341,44 @@ static void swrViewport_Render_Eye(int x) {
         glGenFramebuffers(1, &default_framebuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, default_framebuffer);
 
+        // A framebuffer with ONE sample is not a multisample framebuffer, and building it from
+        // glTexImage2DMultisample anyway is what produced the GL_INVALID_OPERATION flood --
+        // "FBO anti-alias method is not valid for read", 27,984 of them in a single session,
+        // once for roughly every blit out of this target. MSAA off is the default and by far
+        // the common case, so it got the broken path every time.
+        const bool multisampled = current_msaa_samples > 1;
+        const GLenum tex_target = multisampled ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D;
+
         glGenTextures(1, &framebuffer_depth_tex);
-        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, framebuffer_depth_tex);
-        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, current_msaa_samples,
-                                GL_DEPTH_COMPONENT32, width, height, true);
+        glBindTexture(tex_target, framebuffer_depth_tex);
+        if (multisampled) {
+            glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, current_msaa_samples,
+                                    GL_DEPTH_COMPONENT32, width, height, true);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, width, height, 0,
+                         GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+            // A single-sample attachment is sampled through the ordinary texture path, so it
+            // needs complete filter state; the multisample path has none and needs none.
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, framebuffer_depth_tex, 0);
 
         glGenTextures(1, &framebuffer_color_tex);
-        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, framebuffer_color_tex);
-        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, current_msaa_samples, GL_RGBA8, width,
-                                height, true);
+        glBindTexture(tex_target, framebuffer_color_tex);
+        if (multisampled) {
+            glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, current_msaa_samples, GL_RGBA8,
+                                    width, height, true);
+        } else {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, framebuffer_color_tex, 0);
 
         const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
@@ -2363,9 +2391,11 @@ static void swrViewport_Render_Eye(int x) {
         // above is not a format GL guarantees is renderable (16/24/32F are) -- prime suspect.
         if (hook_log) {
             const GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            fprintf(hook_log, "[FBO] default_framebuffer %s status=0x%04x %dx%d msaa=%d\n",
+            fprintf(hook_log,
+                    "[FBO] default_framebuffer %s status=0x%04x %dx%d msaa=%d (%s attachments)\n",
                     fb_status == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE",
-                    (unsigned) fb_status, width, height, current_msaa_samples);
+                    (unsigned) fb_status, width, height, current_msaa_samples,
+                    multisampled ? "multisample" : "single-sample");
             fflush(hook_log);
         }
     }
@@ -2512,8 +2542,21 @@ static void swrViewport_Render_Eye(int x) {
     // Cockpit view is an extra stop on the game's own camera cycle (see swrRace_delta.cpp),
     // inserted straight after the default chase camera.
     // Tell the settings which pod is being flown, so the seat offset can be that pod's.
-    if (currentPlayer_Test != nullptr)
-        vr_cockpit_note_pod(swrObjJdge_localRacerId);
+    //
+    // Read from the pod actually being rendered, NOT swrObjJdge_localRacerId: that global is
+    // assigned once during race init, and the Quick Race panel's 'RStr' reload does not go back
+    // through it. Switching pods mid-session left the seat panel naming the previous racer --
+    // which is precisely the mis-attachment the per-pod seats exist to avoid.
+    //
+    // Every hop is checked. A dangling score_ptr is what crashed v1.2 at race end, and an id
+    // outside the roster would index the seat table out of bounds; either way, leave the active
+    // pod as it was rather than act on a value we cannot stand behind.
+    if (currentPlayer_Test != nullptr && currentPlayer_Test->score_ptr != nullptr &&
+        currentPlayer_Test->score_ptr->pilotId != nullptr) {
+        const int pilot = *currentPlayer_Test->score_ptr->pilotId;
+        if (pilot >= 0 && pilot < 23)
+            vr_cockpit_note_pod(pilot);
+    }
     if (vr_cockpit_view() && currentPlayer_Test != nullptr && vr_cockpit_step_active()) {
         const rdMatrix44 &C = currentPlayer_Test->cockpitXf;
 

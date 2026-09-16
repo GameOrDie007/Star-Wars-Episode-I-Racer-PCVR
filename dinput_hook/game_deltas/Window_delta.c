@@ -182,10 +182,36 @@ void set_window_mode(int mode) {
             glfwSetWindowMonitor(window, NULL, x, y, w, h, 0);
             break;
         }
-        case WINDOW_MODE_BORDERLESS:
+        case WINDOW_MODE_BORDERLESS: {
+            // vidmode->width/height are the display MODE -- physical pixels from
+            // EnumDisplaySettings -- while window position and size are in screen coordinates.
+            // Those agree only on a DPI-aware process at 100% scaling. At 150% (or with the
+            // process DPI-unaware) this asked for a window half again too wide, which ran off
+            // the primary monitor onto the next one and was clipped there.
+            //
+            // The monitor rectangle from GetMonitorInfo is in the same coordinates as the
+            // window, so it is correct under every combination. rcMonitor, not rcWork:
+            // borderless should cover the monitor, taskbar included.
+            int bx = 0, by = 0, bw = vidmode->width, bh = vidmode->height;
+            MONITORINFO mi = {sizeof(mi)};
+            HMONITOR hmon = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+            if (hmon != NULL && GetMonitorInfoW(hmon, &mi) &&
+                mi.rcMonitor.right > mi.rcMonitor.left &&
+                mi.rcMonitor.bottom > mi.rcMonitor.top) {
+                bx = mi.rcMonitor.left;
+                by = mi.rcMonitor.top;
+                bw = mi.rcMonitor.right - mi.rcMonitor.left;
+                bh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            }
             glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
-            glfwSetWindowMonitor(window, NULL, 0, 0, vidmode->width, vidmode->height, 0);
+            glfwSetWindowMonitor(window, NULL, bx, by, bw, bh, 0);
+            if (hook_log != NULL) {
+                fprintf(hook_log, "[window] borderless -> %dx%d at %d,%d (primary monitor)\n",
+                        bw, bh, bx, by);
+                fflush(hook_log);
+            }
             break;
+        }
         case WINDOW_MODE_FULLSCREEN:
             glfwSetWindowMonitor(window, monitor, 0, 0, vidmode->width, vidmode->height,
                                  vidmode->refreshRate);

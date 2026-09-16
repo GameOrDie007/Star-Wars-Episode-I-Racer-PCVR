@@ -76,6 +76,36 @@ static PFN_xrWaitFrame p_xrWaitFrame = nullptr;
 // than 0, because 0 is a perfectly reasonable tuned value.
 #define VR_SEAT_UNTUNED (-99999.0f)
 
+// Seat positions tuned in the headset, one pod at a time, on 15 Sep 2026. The pods differ
+// enough that no single offset fits them all -- `up` spans -0.20 to 1.70 here and `back`
+// spans -2.00 to 2.70 -- which is exactly why these are per-pod. An ini entry overrides
+// its pod; a pod with no entry uses the value below rather than the generic fallback.
+static const float kSeatDefaults[23][3] = {
+    {  0.80f,   0.30f,   0.00f},//  0 Anakin
+    {  0.20f,  -1.30f,   0.00f},//  1 Teemto
+    {  1.30f,   0.80f,   0.00f},//  2 Sebulba
+    {  1.40f,  -0.20f,   0.00f},//  3 Ratts
+    {  0.60f,  -1.00f,   0.00f},//  4 Aldar
+    {  1.20f,   0.90f,   0.00f},//  5 Mawhonic
+    {  0.60f,  -0.50f,   0.00f},//  6 Ark "Bumpy"
+    {  1.10f,  -0.50f,   0.00f},//  7 Wan
+    {  1.10f,   1.10f,   0.00f},//  8 Mars
+    {  1.10f,   0.00f,   0.00f},//  9 Ebe
+    {  0.90f,  -0.20f,   0.00f},// 10 Dud
+    {  1.10f,   1.10f,   0.00f},// 11 Gasgano
+    { -0.20f,   0.10f,   0.00f},// 12 Clegg
+    {  0.90f,  -1.30f,   0.00f},// 13 Elan
+    {  0.90f,  -2.00f,   0.00f},// 14 Neva
+    {  0.90f,   1.10f,   0.00f},// 15 Bozzie
+    {  1.40f,   2.70f,   0.00f},// 16 Boles
+    {  1.10f,   0.80f,   0.00f},// 17 Ody
+    {  1.10f,  -1.80f,   0.00f},// 18 Fud
+    {  1.60f,   0.00f,   0.00f},// 19 Ben
+    {  1.40f,   0.50f,   0.00f},// 20 Slide
+    {  1.70f,  -1.30f,   0.00f},// 21 Toy
+    {  0.50f,  -0.80f,   0.00f},// 22 "Bullseye"
+};
+
 static double g_last_wait_ms = 0.0;
 
 // Defined with the frame-timeline code further down; used by the per-frame sampling above it.
@@ -421,7 +451,11 @@ static void vr_settings_load(void) {
             g_s.cockpit_seat[i][1] = b;
             g_s.cockpit_seat[i][2] = r;
         } else {
-            g_s.cockpit_seat[i][0] = VR_SEAT_UNTUNED;
+            // No entry for this pod: use the tuned built-in. A fresh install is then already
+            // sitting correctly in all twenty-three cockpits with no ini and no setup.
+            g_s.cockpit_seat[i][0] = kSeatDefaults[i][0];
+            g_s.cockpit_seat[i][1] = kSeatDefaults[i][1];
+            g_s.cockpit_seat[i][2] = kSeatDefaults[i][2];
         }
     }
     g_s.panel_distance = vr_ini_get_f("panel_distance", g_s.panel_distance);
@@ -2342,8 +2376,13 @@ void vr_probe_draw_imgui(void) {
                 back = &g_s.cockpit_seat[pod][1];
                 right = &g_s.cockpit_seat[pod][2];
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Reset to shared"))
-                    g_s.cockpit_seat[pod][0] = VR_SEAT_UNTUNED;
+                if (ImGui::SmallButton("Reset to built-in")) {
+                    g_s.cockpit_seat[pod][0] = kSeatDefaults[pod][0];
+                    g_s.cockpit_seat[pod][1] = kSeatDefaults[pod][1];
+                    g_s.cockpit_seat[pod][2] = kSeatDefaults[pod][2];
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Restores this pod's tuned built-in position.");
             }
         } else {
             ImGui::TextDisabled("Not in a race - editing the shared offsets.");
@@ -2358,6 +2397,21 @@ void vr_probe_draw_imgui(void) {
             ImGui::SetTooltip("1 welds the camera to the pod. 0 keeps the horizon level.\n"
                               "Pitch and yaw follow the pod either way. Lower this if the\n"
                               "rolling is uncomfortable.");
+        // Tuning twenty-three pods by eye is a long session to lose to a save that did not
+        // fire. The automatic save above should cover it now; this is here so it can be
+        // KNOWN rather than assumed, and it reports where it wrote.
+        if (ImGui::Button("Save settings now")) {
+            vr_settings_save();
+            xr_logf("settings saved on request: %s", vr_ini_path());
+        }
+        ImGui::SameLine();
+        {
+            int tuned_count = 0;
+            for (int i = 0; i < 23; i++)
+                if (g_s.cockpit_seat[i][0] != VR_SEAT_UNTUNED)
+                    tuned_count++;
+            ImGui::TextDisabled("%d of 23 pods tuned", tuned_count);
+        }
     }
     ImGui::Checkbox("Submit to headset", &g_s.submit_enabled);
     ImGui::Separator();
@@ -2425,7 +2479,12 @@ void vr_probe_draw_imgui(void) {
         memcmp(&before.cockpit_up, &g_s.cockpit_up, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_back, &g_s.cockpit_back, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_right, &g_s.cockpit_right, sizeof(float)) != 0 ||
-        memcmp(&before.cockpit_roll, &g_s.cockpit_roll, sizeof(float)) != 0) {
+        memcmp(&before.cockpit_roll, &g_s.cockpit_roll, sizeof(float)) != 0 ||
+        // The per-pod seat table, compared as one block. It was absent from this list when
+        // it was added to the struct, so eleven pods of hand tuning were discarded in
+        // silence -- while cockpit_roll, a slider three pixels below them, saved fine.
+        // One memcmp rather than 69 comparisons nobody would keep up to date.
+        memcmp(before.cockpit_seat, g_s.cockpit_seat, sizeof(g_s.cockpit_seat)) != 0) {
         vr_settings_save();
     }
 }
