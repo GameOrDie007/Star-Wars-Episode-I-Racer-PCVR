@@ -607,6 +607,28 @@ extern "C" void swrPlayerHUD_RenderAllViewports_delta(void) {
 // got this frame. The periodic matrix log shows a correct stereo pair, yet the captured images
 // are ~30 degrees apart -- which can only mean the two captures happened at different moments.
 // Recording these AT THE BLIT ties the pixels and the matrix to the same instant.
+// Is this memory safe to read? Used before touching a pointer the GAME owns and may have
+// freed. A null check cannot tell a freed pointer from a live one; asking the OS whether
+// the page is committed and readable can. It does not make a stale read CORRECT -- a
+// recycled allocation is readable and meaningless -- so callers must still sanity-check
+// the value. It only guarantees the attempt cannot take the process down.
+static bool mem_is_readable(const void *p, size_t bytes) {
+    if (p == nullptr || bytes == 0)
+        return false;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0)
+        return false;
+    if (mbi.State != MEM_COMMIT)
+        return false;
+    const DWORD unreadable = PAGE_NOACCESS | PAGE_GUARD;
+    if ((mbi.Protect & unreadable) != 0)
+        return false;
+    // A pointer near the end of a committed region must not run off into the next one.
+    const uintptr_t want_end = (uintptr_t) p + bytes;
+    const uintptr_t region_end = (uintptr_t) mbi.BaseAddress + (uintptr_t) mbi.RegionSize;
+    return want_end <= region_end;
+}
+
 static float g_vr_capture_view[2][16] = {};
 static int g_vr_passes_this_frame[2] = {0, 0};
 
@@ -2551,11 +2573,24 @@ static void swrViewport_Render_Eye(int x) {
     // Every hop is checked. A dangling score_ptr is what crashed v1.2 at race end, and an id
     // outside the roster would index the seat table out of bounds; either way, leave the active
     // pod as it was rather than act on a value we cannot stand behind.
-    if (currentPlayer_Test != nullptr && currentPlayer_Test->score_ptr != nullptr &&
-        currentPlayer_Test->score_ptr->pilotId != nullptr) {
-        const int pilot = *currentPlayer_Test->score_ptr->pilotId;
-        if (pilot >= 0 && pilot < 23)
-            vr_cockpit_note_pod(pilot);
+    // The race must be LIVE before any of this is touched. At race end currentPlayer_Test is
+    // still non-null and score_ptr still holds its old value, but the record it points at has
+    // been freed -- so a null check passes and the read faults. That crashed v1.4 at the end of
+    // every race, and it is the same failure as v1.2, in the same field family.
+    //
+    // The judge entity exists for the life of the race and is fetched through the event
+    // registry, which returns null when it is gone. That is a real liveness signal rather than
+    // a guess about a pointer's contents.
+    if (currentPlayer_Test != nullptr && swrEvent_GetItem('Jdge', 0) != nullptr &&
+        mem_is_readable(currentPlayer_Test->score_ptr, sizeof(swrScore))) {
+        const int *pilot_ptr = currentPlayer_Test->score_ptr->pilotId;
+        if (mem_is_readable(pilot_ptr, sizeof(int))) {
+            const int pilot = *pilot_ptr;
+            // Garbage from a recycled allocation cannot pass this, so a stale read costs a
+            // wrong seat offset for one frame at worst, never a crash.
+            if (pilot >= 0 && pilot < 23)
+                vr_cockpit_note_pod(pilot);
+        }
     }
     if (vr_cockpit_view() && currentPlayer_Test != nullptr && vr_cockpit_step_active()) {
         const rdMatrix44 &C = currentPlayer_Test->cockpitXf;
