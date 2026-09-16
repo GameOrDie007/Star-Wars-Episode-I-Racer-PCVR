@@ -1,6 +1,7 @@
 #include "Window_delta.h"
 #include "swrGamepadNav_delta.h"
 #include "window_mode.h"
+#include "../vr_probe.h"// vr_perf_mark (frame timeline)
 
 #include <stdio.h>
 #include <Windows.h>
@@ -423,9 +424,58 @@ void GLAPIENTRY Window_glDebugMessageCallback(GLenum source, GLenum type, GLuint
         return;
     }
 
-    fprintf(hook_log, "[OpenGL](%d, %s) %s (%s): %s\n", id, type_str, severity_str, source_str,
-            message);
-    fflush(hook_log);
+    // Log the first few of each distinct message, then COUNT the rest.
+    //
+    // A GL error fires on every draw for as long as the state that causes it is wrong, so
+    // logging each occurrence is not a diagnostic, it is a flood: 24,580 lines in one session,
+    // each an fprintf AND an fflush -- a synchronous disk write on the render thread. That
+    // measured as 60-105 ms frames in bursts, which a player feels as the game freezing.
+    //
+    // The first few carry all the information; the rest only carry the fact that it is still
+    // happening, which a count conveys just as well and for nothing.
+    enum { GL_MSG_SLOTS = 32, GL_MSG_LOG_FIRST = 3 };
+    static unsigned int seen_id[GL_MSG_SLOTS];
+    static unsigned long seen_count[GL_MSG_SLOTS];
+    static int seen_n = 0;
+    static unsigned long suppressed_total = 0;
+    static unsigned int last_summary_ms = 0;
+
+    int slot = -1;
+    for (int i = 0; i < seen_n; i++) {
+        if (seen_id[i] == (unsigned int) id) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 && seen_n < GL_MSG_SLOTS) {
+        slot = seen_n++;
+        seen_id[slot] = (unsigned int) id;
+        seen_count[slot] = 0;
+    }
+    const unsigned long n = (slot >= 0) ? ++seen_count[slot] : 0;
+
+    if (slot < 0 || n <= GL_MSG_LOG_FIRST) {
+        fprintf(hook_log, "[OpenGL](%d, %s) %s (%s): %s\n", id, type_str, severity_str,
+                source_str, message);
+        if (slot >= 0 && n == GL_MSG_LOG_FIRST)
+            fprintf(hook_log, "[OpenGL] (id %d repeated - further occurrences counted only)\n",
+                    id);
+        fflush(hook_log);
+        return;
+    }
+
+    // Suppressed. Summarise occasionally so a run that is drowning in errors still says so,
+    // at a cost of one line every few seconds instead of one per draw call.
+    suppressed_total++;
+    const unsigned int now_ms = GetTickCount();
+    if (now_ms - last_summary_ms >= 10000) {
+        last_summary_ms = now_ms;
+        fprintf(hook_log, "[OpenGL] %lu messages suppressed so far;", suppressed_total);
+        for (int i = 0; i < seen_n; i++)
+            fprintf(hook_log, " id %u x%lu", seen_id[i], seen_count[i]);
+        fprintf(hook_log, "\n");
+        fflush(hook_log);
+    }
 }
 
 // 0x0049cd40
@@ -476,11 +526,19 @@ int Window_Main_delta(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLin
     Main_Startup((char *) pCmdLine);
 
     // NEEDS to be AFTER Main_Startup !
-    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    //
+    // GL_DEBUG_OUTPUT_SYNCHRONOUS is deliberately NOT enabled. It makes the driver invoke the
+    // callback inline inside the offending GL call, which defeats command batching and
+    // serialises the driver for the entire run -- a cost paid on every frame, not only while
+    // errors are firing. The callback still reports everything; only the ordering guarantee is
+    // lost, and nothing here depends on it. Re-enable it temporarily if a message ever needs to
+    // be tied to an exact call site.
     glDebugMessageCallback(Window_glDebugMessageCallback, 0);
 
     while (!glfwWindowShouldClose(window)) {
+        vr_perf_mark("guiAdvance");
         swrMain2_GuiAdvance();
+        vr_perf_mark("pollEvents");
 #if !ENABLE_GLFW_INPUT_HANDLING
         // if glfw input handling is enabled, glfwPollEvents is called in stdControl_ReadControls
         // instead. this is important for the timing of the input state.

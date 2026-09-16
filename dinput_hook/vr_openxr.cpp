@@ -2,11 +2,16 @@
 // backend did, so the renderer is untouched: per-eye frusta, the view composition, the depth-clear
 // fix, the HUD layer and the culling widening all carry over unchanged.
 //
-// Why OpenXR is possible here at all: the game and this DLL are 32-bit, and SteamVR ships its
-// OpenXR loader as win64 only -- which is what made me write the OpenVR backend first. But
-// VirtualDesktop's VDXR registers a genuine i686 runtime under
-// HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1, so a 32-bit OpenXR app works as long as VDXR (or
-// another 32-bit-capable runtime) is active. SteamVR alone still cannot host us.
+// Why OpenXR is possible here at all: the game and this DLL are 32-bit, so they need a runtime
+// that registers a 32-bit entry under HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1. SteamVR
+// shipped win64 only for most of its life -- which is what made me write the OpenVR backend
+// first -- while VirtualDesktop's VDXR has always registered a genuine i686 runtime.
+//
+// As of SteamVR 2.17 that is no longer true: it ships steamxr_win32.json, and enumerating it
+// from a 32-bit process reports 41 extensions including XR_KHR_opengl_enable v12 -- the one
+// that matters, since this renderer is OpenGL and SteamVR was D3D/Vulkan-only for years. That
+// makes SteamVR the only route for a TETHERED headset (Rift, Index, Vive, WMR), which Virtual
+// Desktop cannot serve at all.
 //
 // Two structural differences from the OpenVR backend, both of which shape the code below:
 //
@@ -67,7 +72,28 @@ static PFN_xrBeginSession p_xrBeginSession = nullptr;
 static PFN_xrEndSession p_xrEndSession = nullptr;
 static PFN_xrWaitFrame p_xrWaitFrame = nullptr;
 // Milliseconds spent blocked inside the most recent xrWaitFrame.
+// Marks a pod whose seat has never been tuned: it inherits the global offsets. Chosen rather
+// than 0, because 0 is a perfectly reasonable tuned value.
+#define VR_SEAT_UNTUNED (-99999.0f)
+
 static double g_last_wait_ms = 0.0;
+
+// Defined with the frame-timeline code further down; used by the per-frame sampling above it.
+static void vr_perf_marks_frame_end(double frame_ms);
+
+// Scoped QPC timer: adds its elapsed ticks to a counter when it goes out of scope.
+struct PhaseTimer {
+    long long *sink;
+    LARGE_INTEGER t0;
+    explicit PhaseTimer(long long *s) : sink(s) {
+        QueryPerformanceCounter(&t0);
+    }
+    ~PhaseTimer() {
+        LARGE_INTEGER t1;
+        QueryPerformanceCounter(&t1);
+        *sink += (t1.QuadPart - t0.QuadPart);
+    }
+};
 static PFN_xrBeginFrame p_xrBeginFrame = nullptr;
 static PFN_xrEndFrame p_xrEndFrame = nullptr;
 static PFN_xrLocateViews p_xrLocateViews = nullptr;
@@ -169,11 +195,44 @@ struct VrState {
     float yaw_deg = 0.0f, pitch_deg = 0.0f, roll_deg = 0.0f;
     float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
     unsigned long frames = 0, valid_frames = 0, submits = 0;
+    // What actually reached the compositor. A discarded xrEndFrame result is why the mod
+    // could report a locked 90 while the headset was visibly dropping frames.
+    unsigned long end_frames = 0;      // frames that called xrEndFrame at all
+    unsigned long end_frame_fails = 0; // ...and were refused
+    unsigned long empty_frames = 0;    // ...carrying no layers, i.e. presenting nothing new
+    int last_end_frame_result = 0;
+    float display_refresh_hz = 0.0f;
+    // Per-phase accumulators, in QPC ticks, reset every reporting window. The frame TOTAL is
+    // pinned to the display cadence by the runtime, so only the parts can show where a cost
+    // appeared.
+    long long t_submit = 0, t_endframe = 0;
+    // Per-eye render, reported from the renderer. Counted as well as summed: the count
+    // confirms two passes per frame rather than assuming it.
+    double t_eye_ms = 0.0;
+    unsigned long eye_passes = 0;
     char status[256] = "not initialised";
     char runtime_name[128] = "";
 
     bool submit_enabled = true;
     bool head_drives_camera = true;
+    // Cockpit view: drive the camera from the pod's own cockpit transform rather than from
+    // whichever chase camera the game selected. Off by default -- it changes the whole feel of
+    // the game and nobody should get it without asking.
+    bool cockpit_view = true;
+    // Seat offset from the cockpit part's origin, in game units, in the pod's own frame. The
+    // part origin is a pivot, not a pilot's eyes, so these exist to be tuned by someone who can
+    // see the result. Up is +Z, back is -Y, right is +X.
+    float cockpit_up = 0.0f;
+    float cockpit_back = 0.0f;
+    float cockpit_right = 0.0f;
+    // How much of the pod's roll the camera inherits. 1 = welded to the pod, 0 = horizon held
+    // level. Pitch and yaw are unaffected at every setting. Comfort, not correctness.
+    float cockpit_roll = 0.35f;
+    // Per-pod seat offsets. Index is the pilot id (0..22). NaN in [0] means 'not tuned',
+    // which falls back to the three globals above -- a pod with no entry behaves exactly as
+    // before, so adding this cannot regress anything already set.
+    float cockpit_seat[23][3];
+    int active_pod = -1;
     bool swap_eye_order = false;
     // 0.0 is the tested value; 1.0 was a default nobody has played with.
     float menu_shift = 0.0f;
@@ -346,6 +405,25 @@ static void vr_ini_set_b(const char *key, bool v) {
 
 static void vr_settings_load(void) {
     g_s.world_units_per_metre = vr_ini_get_f("world_units_per_metre", g_s.world_units_per_metre);
+    g_s.cockpit_view = vr_ini_get_b("cockpit_view", g_s.cockpit_view);
+    g_s.cockpit_up = vr_ini_get_f("cockpit_up", g_s.cockpit_up);
+    g_s.cockpit_back = vr_ini_get_f("cockpit_back", g_s.cockpit_back);
+    g_s.cockpit_right = vr_ini_get_f("cockpit_right", g_s.cockpit_right);
+    g_s.cockpit_roll = vr_ini_get_f("cockpit_roll", g_s.cockpit_roll);
+    for (int i = 0; i < 23; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "cockpit_seat_%d", i);
+        char buf[96] = {0};
+        GetPrivateProfileStringA("vr", key, "", buf, sizeof(buf), vr_ini_path());
+        float u = 0.0f, b = 0.0f, r = 0.0f;
+        if (buf[0] != '\0' && sscanf(buf, "%f %f %f", &u, &b, &r) == 3) {
+            g_s.cockpit_seat[i][0] = u;
+            g_s.cockpit_seat[i][1] = b;
+            g_s.cockpit_seat[i][2] = r;
+        } else {
+            g_s.cockpit_seat[i][0] = VR_SEAT_UNTUNED;
+        }
+    }
     g_s.panel_distance = vr_ini_get_f("panel_distance", g_s.panel_distance);
     g_s.panel_width = vr_ini_get_f("panel_width", g_s.panel_width);
     g_s.hud_scale = vr_ini_get_f("hud_scale", g_s.hud_scale);
@@ -401,6 +479,20 @@ static void vr_settings_load(void) {
 
 void vr_settings_save(void) {
     vr_ini_set_f("world_units_per_metre", g_s.world_units_per_metre);
+    vr_ini_set_b("cockpit_view", g_s.cockpit_view);
+    vr_ini_set_f("cockpit_up", g_s.cockpit_up);
+    vr_ini_set_f("cockpit_back", g_s.cockpit_back);
+    vr_ini_set_f("cockpit_right", g_s.cockpit_right);
+    vr_ini_set_f("cockpit_roll", g_s.cockpit_roll);
+    for (int i = 0; i < 23; i++) {
+        if (g_s.cockpit_seat[i][0] == VR_SEAT_UNTUNED)
+            continue;// untuned pods write nothing, so the ini stays readable
+        char key[32], buf[96];
+        snprintf(key, sizeof(key), "cockpit_seat_%d", i);
+        snprintf(buf, sizeof(buf), "%.2f %.2f %.2f", g_s.cockpit_seat[i][0],
+                 g_s.cockpit_seat[i][1], g_s.cockpit_seat[i][2]);
+        WritePrivateProfileStringA("vr", key, buf, vr_ini_path());
+    }
     vr_ini_set_f("panel_distance", g_s.panel_distance);
     vr_ini_set_f("panel_width", g_s.panel_width);
     vr_ini_set_f("hud_scale", g_s.hud_scale);
@@ -509,6 +601,47 @@ template <typename T> static bool resolve(XrInstance inst, const char *name, T *
     }
     *out = (T) fn;
     return true;
+}
+
+// True once log_active_runtime() has found a 32-bit runtime to report.
+static bool g_have_32bit_runtime = false;
+
+// Report which 32-bit OpenXR runtime the loader is going to pick, before anything can fail.
+//
+// The game and this DLL are 32-bit, so they need a runtime that registers a 32-bit entry. A
+// 64-bit-only runtime -- the Oculus PC runtime, and SteamVR before 2.17 -- cannot host them
+// however well the headset works in other titles, and the user has no way to tell: the headset is
+// connected, every other game is fine, and this one silently opens on the monitor.
+//
+// The loader reads HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime, which a 32-bit process sees
+// redirected to WOW6432Node. KEY_WOW64_32KEY asks for that view explicitly rather than relying on
+// the redirection, so the line means the same thing whoever reads it.
+static void log_active_runtime(void) {
+    // XR_RUNTIME_JSON overrides the registry for one process, so it has to be reported or the
+    // logged value is a lie whenever anyone is testing a specific runtime.
+    char env[512] = {};
+    if (GetEnvironmentVariableA("XR_RUNTIME_JSON", env, sizeof(env) - 1) > 0 && env[0] != '\0') {
+        xr_logf("32-bit OpenXR runtime: %s  (forced by XR_RUNTIME_JSON)", env);
+        g_have_32bit_runtime = true;
+        return;
+    }
+
+    HKEY key = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Khronos\\OpenXR\\1", 0,
+                      KEY_QUERY_VALUE | KEY_WOW64_32KEY, &key) == ERROR_SUCCESS) {
+        char path[512] = {};
+        DWORD size = sizeof(path) - 1;
+        DWORD type = 0;
+        const LONG r =
+            RegQueryValueExA(key, "ActiveRuntime", nullptr, &type, (LPBYTE) path, &size);
+        RegCloseKey(key);
+        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && path[0] != '\0') {
+            xr_logf("32-bit OpenXR runtime: %s", path);
+            g_have_32bit_runtime = true;
+            return;
+        }
+    }
+    xr_logf("32-bit OpenXR runtime: NONE REGISTERED");
 }
 
 static bool create_instance(void) {
@@ -861,6 +994,27 @@ static void try_init(void) {
 
     g_init_attempted = true;
     xr_logf("---- PCVR (OpenXR backend) ----");
+
+    // Runtime override, from the ini rather than the environment.
+    //
+    // XR_RUNTIME_JSON is the natural way to point one process at a specific runtime, and it
+    // cannot be used here: this game requires elevation, and an elevated launch silently
+    // discards the environment the launcher set. A desk harness therefore has no way to
+    // select a runtime -- which matters because VirtualDesktop answers xrGetSystem with
+    // FORM_FACTOR_UNAVAILABLE when no headset is streaming, while SteamVR's null driver will
+    // happily provide a virtual one and let the whole frame path be measured with no
+    // hardware at all.
+    //
+    // Set before the loader is touched, so it is read during loader init. Absent = untouched.
+    {
+        char rt[512] = {};
+        GetPrivateProfileStringA("vr", "runtime_json", "", rt, sizeof(rt), vr_ini_path());
+        if (rt[0] != '\0') {
+            SetEnvironmentVariableA("XR_RUNTIME_JSON", rt);
+            xr_logf("runtime_json override from ini: %s", rt);
+        }
+    }
+    log_active_runtime();
     vr_settings_load();
 
     char no_vr[8] = {0};
@@ -875,7 +1029,21 @@ static void try_init(void) {
     }
 
     if (!load_loader() || !create_instance() || !create_session_and_swapchains()) {
-        set_status("OpenXR init failed - running flat (see hook.log)");
+        // Two very different situations, and telling them apart is the whole value of this
+        // message: there is no runtime to talk to, or there is one and it refused us.
+        if (!g_have_32bit_runtime) {
+            set_status("No 32-bit OpenXR runtime - running flat (see hook.log)");
+            xr_logf("VR did not start: no 32-bit OpenXR runtime is registered on this machine.");
+            xr_logf("  This game is 32-bit and cannot use a 64-bit-only runtime, however well");
+            xr_logf("  the headset works in other titles. Runtimes that register a 32-bit entry:");
+            xr_logf("    - Virtual Desktop (streaming to a standalone headset)");
+            xr_logf("    - SteamVR 2.17 and later: Settings > OpenXR > Set SteamVR as OpenXR Runtime");
+            xr_logf("  The Oculus PC runtime provides a 64-bit runtime only.");
+        } else {
+            set_status("OpenXR init failed - running flat (see hook.log)");
+            xr_logf("VR did not start, but a 32-bit runtime IS registered (named above), so this");
+            xr_logf("  is not the usual missing-runtime case. The failing call is logged above.");
+        }
         g_gave_up = true;
         return;
     }
@@ -971,6 +1139,7 @@ void vr_begin_frame(void) {
         return;
 
     g_s.frames++;
+    vr_perf_mark("waitFrame");
 
     g_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
     XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
@@ -1053,6 +1222,7 @@ void vr_begin_frame(void) {
             // Log the outliers as they happen, with a frame number, so a stall can be lined up
             // against everything else in the log. The distribution below says stalls exist; this
             // says WHEN, which is the part that identifies them.
+            vr_perf_marks_frame_end(ms);
             if (ms > 50.0)
                 xr_logf("[perf] STALL %.1f ms at frame %lu -- %.1f ms blocked in xrWaitFrame, "
                         "%.1f ms our own work (%s)",
@@ -1086,11 +1256,68 @@ void vr_begin_frame(void) {
                 for (int i = 0; i < 300; i++)
                     wsum += perf_wait[i];
                 const double mean = sum / 300.0;
+                // The render resolution belongs HERE, not only in a startup line hundreds of
+                // lines earlier. It is the largest single determinant of frame time and it can
+                // change without anyone touching a setting -- Windows DPI scaling silently put
+                // this game at 1.5x once, 2.25x the pixels, and the frame times alone could not
+                // say why. A perf report should answer that question on its own line.
+                // Every frame-rate judgement here is against an assumed 90 Hz. If the headset
+                // is running at some other rate then the COMPARISON is wrong, not the game --
+                // so ask the runtime rather than assuming. Once per session; the call needs a
+                // live session, which is why it is here and not beside the instance setup.
+                if (g_s.display_refresh_hz == 0.0f && g_session != XR_NULL_HANDLE &&
+                    p_xrGetInstanceProcAddr != nullptr) {
+                    typedef XrResult(XRAPI_PTR * PFN_GetHz)(XrSession, float *);
+                    PFN_xrVoidFunction fn = nullptr;
+                    if (XR_SUCCEEDED(p_xrGetInstanceProcAddr(
+                            g_instance, "xrGetDisplayRefreshRateFB", &fn)) &&
+                        fn != nullptr) {
+                        float hz = 0.0f;
+                        if (XR_SUCCEEDED(((PFN_GetHz) fn)(g_session, &hz)) && hz > 0.0f)
+                            g_s.display_refresh_hz = hz;
+                    }
+                    if (g_s.display_refresh_hz == 0.0f)
+                        g_s.display_refresh_hz = -1.0f;// asked, unavailable: do not retry
+                }
+                // Phase averages for this window. REST is the remainder -- the game's own
+                // simulation and render -- deliberately derived by subtraction so that any
+                // cost nobody has attributed shows up as a gap instead of hiding in a phase.
+                LARGE_INTEGER qpf;
+                QueryPerformanceFrequency(&qpf);
+                const double tick_ms =
+                    (qpf.QuadPart != 0) ? 1000.0 / (double) qpf.QuadPart : 0.0;
+                const double ms_submit = (double) g_s.t_submit * tick_ms / 300.0;
+                const double ms_endframe = (double) g_s.t_endframe * tick_ms / 300.0;
+                const double ms_eyes = g_s.t_eye_ms / 300.0;
+                const double eyes_per_frame = (double) g_s.eye_passes / 300.0;
+                GLint vp_now[4] = {0, 0, 0, 0};
+                glGetIntegerv(GL_VIEWPORT, vp_now);
+                // Per-window deltas, so a problem that starts mid-session is visible as a
+                // change rather than hidden in a total that only grows.
+                static unsigned long prev_end = 0, prev_fail = 0, prev_empty = 0;
+                const unsigned long d_end = g_s.end_frames - prev_end;
+                const unsigned long d_fail = g_s.end_frame_fails - prev_fail;
+                const unsigned long d_empty = g_s.empty_frames - prev_empty;
+                prev_end = g_s.end_frames;
+                prev_fail = g_s.end_frame_fails;
+                prev_empty = g_s.empty_frames;
                 xr_logf("[perf] frame ms  mean %.2f (%.1f fps)  p50 %.2f  p95 %.2f  p99 %.2f  "
-                        "max %.2f  dropped %d/300 (%.1f%%)  waiting %.2f ms/frame (%.0f%%)",
+                        "max %.2f  dropped %d/300 (%.1f%%)  waiting %.2f ms/frame (%.0f%%)  "
+                        "@%dx%d  submitted %lu/300 (empty %lu, refused %lu, last 0x%x)  %.0fHz  "
+                        "| wait %.2f  submit %.2f  endframe %.2f  REST %.2f ms  "
+                        "(eyes %.2f x%.1f, sim %.2f)",
                         mean, mean > 0.0 ? 1000.0 / mean : 0.0, s[149], s[284], s[296], s[299],
                         over, 100.0 * (double) over / 300.0, wsum / 300.0,
-                        sum > 0.0 ? 100.0 * wsum / sum : 0.0);
+                        sum > 0.0 ? 100.0 * wsum / sum : 0.0, vp_now[2], vp_now[3], d_end,
+                        d_empty, d_fail, (unsigned) g_s.last_end_frame_result,
+                        (double) g_s.display_refresh_hz, wsum / 300.0, ms_submit, ms_endframe,
+                        mean - (wsum / 300.0) - ms_submit - ms_endframe, ms_eyes,
+                        eyes_per_frame,
+                        mean - (wsum / 300.0) - ms_submit - ms_endframe - ms_eyes);
+                g_s.t_submit = 0;
+                g_s.t_endframe = 0;
+                g_s.t_eye_ms = 0.0;
+                g_s.eye_passes = 0;
                 perf_n = 0;
             }
         }
@@ -1163,6 +1390,95 @@ int vr_get_eye_projection(int eye, float znear, float zfar, float *out16) {
     return 1;
 }
 
+// Cockpit view, read by the renderer's camera site once per eye.
+int vr_cockpit_view(void) {
+    return (vr_is_active() && g_s.cockpit_view) ? 1 : 0;
+}
+// The renderer pushes the local racer's pilot id across each frame: the id lives in the
+// game's globals, the settings live here. Logged on change so a tuning session always says
+// which pod the sliders are attached to.
+void vr_cockpit_note_pod(int pod) {
+    if (pod < 0 || pod >= 23 || pod == g_s.active_pod)
+        return;
+    g_s.active_pod = pod;
+    const bool tuned = g_s.cockpit_seat[pod][0] != VR_SEAT_UNTUNED;
+    xr_logf("cockpit seat: racer %d is %s (up %.2f back %.2f right %.2f)", pod,
+            tuned ? "TUNED" : "untuned, using the global offsets",
+            tuned ? g_s.cockpit_seat[pod][0] : g_s.cockpit_up,
+            tuned ? g_s.cockpit_seat[pod][1] : g_s.cockpit_back,
+            tuned ? g_s.cockpit_seat[pod][2] : g_s.cockpit_right);
+}
+
+int vr_cockpit_active_pod(void) {
+    return g_s.active_pod;
+}
+
+void vr_cockpit_seat_offset(float *up, float *back, float *right) {
+    const int p = g_s.active_pod;
+    const bool tuned = (p >= 0 && p < 23 && g_s.cockpit_seat[p][0] != VR_SEAT_UNTUNED);
+    if (up)
+        *up = tuned ? g_s.cockpit_seat[p][0] : g_s.cockpit_up;
+    if (back)
+        *back = tuned ? g_s.cockpit_seat[p][1] : g_s.cockpit_back;
+    if (right)
+        *right = tuned ? g_s.cockpit_seat[p][2] : g_s.cockpit_right;
+}
+float vr_cockpit_roll(void) {
+    return g_s.cockpit_roll < 0.0f ? 0.0f : (g_s.cockpit_roll > 1.0f ? 1.0f : g_s.cockpit_roll);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Frame timeline. The frame TOTAL cannot locate a stall -- the runtime pins it to the display
+// cadence -- and the phase split narrowed it only as far as "the remainder", which is the game's
+// entire frame. Marks turn that remainder into a sequence of named gaps.
+//
+// Nothing is printed unless a frame exceeds kSlowFrameMs, so a healthy session is silent.
+// ---------------------------------------------------------------------------------------------
+namespace {
+const int kMaxMarks = 32;
+const double kSlowFrameMs = 40.0;
+
+struct FrameMark {
+    const char *name;// static strings only; stored, never copied
+    LARGE_INTEGER t;
+};
+FrameMark g_marks[kMaxMarks];
+int g_mark_count = 0;
+}// namespace
+
+extern "C" void vr_perf_mark(const char *name) {
+    if (g_mark_count >= kMaxMarks || name == nullptr)
+        return;
+    g_marks[g_mark_count].name = name;
+    QueryPerformanceCounter(&g_marks[g_mark_count].t);
+    g_mark_count++;
+}
+
+// Called once per frame with the measured frame time. Dumps the timeline if it was slow, then
+// starts the next frame's list.
+static void vr_perf_marks_frame_end(double frame_ms) {
+    if (frame_ms >= kSlowFrameMs && g_mark_count >= 2 && hook_log != nullptr) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        const double tick_ms = (f.QuadPart != 0) ? 1000.0 / (double) f.QuadPart : 0.0;
+        fprintf(hook_log, "[slow] %.1f ms frame:", frame_ms);
+        for (int i = 1; i < g_mark_count; i++) {
+            const double gap =
+                (double) (g_marks[i].t.QuadPart - g_marks[i - 1].t.QuadPart) * tick_ms;
+            fprintf(hook_log, "  %s->%s %.1f", g_marks[i - 1].name, g_marks[i].name, gap);
+        }
+        fprintf(hook_log, "\n");
+        fflush(hook_log);
+    }
+    g_mark_count = 0;
+}
+
+void vr_perf_note_eye_render(double ms) {
+    g_s.t_eye_ms += ms;
+    g_s.eye_passes++;
+}
+
 void vr_get_eye_view(int eye, float *out16) {
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!out16)
@@ -1209,6 +1525,7 @@ void vr_get_eye_view(int eye, float *out16) {
 void vr_submit_eye(int eye, unsigned int gl_color_texture) {
     if (!vr_is_active() || gl_color_texture == 0 || eye < 0 || eye > 1)
         return;
+    PhaseTimer _pt(&g_s.t_submit);
     EyeSwapchain &sc = g_eye[eye];
     if (sc.handle == XR_NULL_HANDLE || sc.images.empty())
         return;
@@ -1415,7 +1732,22 @@ void vr_frame_end(void) {
     fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     fei.layerCount = layer_count;
     fei.layers = layer_count ? layers : nullptr;
-    p_xrEndFrame(g_session, &fei);
+    // The result matters: a refused frame is not an error the player sees as one -- the
+    // compositor simply re-presents the last frame it accepted, which looks like a frame rate
+    // dip with nothing wrong in our own timings.
+    vr_perf_mark("endFrame");
+    XrResult end_res;
+    {
+        PhaseTimer _pt(&g_s.t_endframe);
+        end_res = p_xrEndFrame(g_session, &fei);
+    }
+    g_s.end_frames++;
+    if (layer_count == 0)
+        g_s.empty_frames++;
+    if (XR_FAILED(end_res)) {
+        g_s.end_frame_fails++;
+        g_s.last_end_frame_result = (int) end_res;
+    }
 
     g_frame_begun = false;
     g_eye[0].has_image = false;
@@ -1443,6 +1775,12 @@ void vr_probe_shutdown(void) {
         p_xrDestroyInstance(g_instance);
         g_instance = XR_NULL_HANDLE;
     }
+    // Backstop for the comparison list above. That list is hand-maintained, so every setting
+    // added since it was written has been silently unsaveable -- the knob works all session and
+    // is gone on relaunch, which reads as the feature not working rather than as a save bug.
+    // Saving unconditionally here means a future omission costs a setting only when the game is
+    // killed instead of every single time.
+    vr_settings_save();
     xr_logf("shut down after %lu frames (%lu tracked, %lu submitted)", g_s.frames, g_s.valid_frames,
             g_s.submits);
 }
@@ -1959,6 +2297,68 @@ void vr_probe_draw_imgui(void) {
     ImGui::Checkbox("Draw all selector children", &g_s.render_all_selectors);
     ImGui::Checkbox("Swap eye render order", &g_s.swap_eye_order);
     ImGui::Checkbox("Head rotation drives camera", &g_s.head_drives_camera);
+    ImGui::Separator();
+    ImGui::Checkbox("Cockpit view", &g_s.cockpit_view);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Upgrades the game's own first-person view: cycle the camera (stick\n"
+                          "click, or the view button) until you reach it and you are sitting in\n"
+                          "the pod, with the pod drawn around you.\n\n"
+                          "Retail puts that camera between the engines and hides the pod; a\n"
+                          "pilot sits higher and further back, so set the seat below.");
+    if (g_s.cockpit_view) {
+        // Which pod the numbers below belong to. Every pod has a different cockpit, so a
+        // single set of offsets cannot fit them all -- and tuning the wrong one by accident
+        // is the failure this naming exists to prevent.
+        const int pod = g_s.active_pod;
+        float *up = &g_s.cockpit_up;
+        float *back = &g_s.cockpit_back;
+        float *right = &g_s.cockpit_right;
+        if (pod >= 0 && pod < 23) {
+            typedef void(__cdecl * FormatPodNameFn)(int, char *, size_t);
+            char pod_name[128] = {0};
+            ((FormatPodNameFn) 0x004208e0)(pod, pod_name, sizeof(pod_name));
+            // The game embeds ~ formatting codes in its strings; strip them for display.
+            char clean[128] = {0};
+            int w = 0;
+            for (int r = 0; pod_name[r] != '\0' && w < 126; r++) {
+                if (pod_name[r] == '~') {
+                    if (pod_name[r + 1] != '\0')
+                        r++;
+                    continue;
+                }
+                clean[w++] = pod_name[r];
+            }
+            if (g_s.cockpit_seat[pod][0] == VR_SEAT_UNTUNED) {
+                ImGui::Text("Tuning racer %d (%s) - not yet tuned", pod, clean);
+                if (ImGui::Button("Start tuning this pod")) {
+                    g_s.cockpit_seat[pod][0] = g_s.cockpit_up;
+                    g_s.cockpit_seat[pod][1] = g_s.cockpit_back;
+                    g_s.cockpit_seat[pod][2] = g_s.cockpit_right;
+                }
+                ImGui::TextDisabled("Until then it uses the shared offsets below.");
+            } else {
+                ImGui::Text("Tuning racer %d (%s)", pod, clean);
+                up = &g_s.cockpit_seat[pod][0];
+                back = &g_s.cockpit_seat[pod][1];
+                right = &g_s.cockpit_seat[pod][2];
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Reset to shared"))
+                    g_s.cockpit_seat[pod][0] = VR_SEAT_UNTUNED;
+            }
+        } else {
+            ImGui::TextDisabled("Not in a race - editing the shared offsets.");
+        }
+        ImGui::TextWrapped("Seat position, in game units, from the cockpit part's origin. Set "
+                           "these by eye while sitting in the pod.");
+        ImGui::SliderFloat("Seat up", up, -50.0f, 50.0f, "%.1f");
+        ImGui::SliderFloat("Seat back", back, -50.0f, 50.0f, "%.1f");
+        ImGui::SliderFloat("Seat right", right, -50.0f, 50.0f, "%.1f");
+        ImGui::SliderFloat("Follow pod roll", &g_s.cockpit_roll, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("1 welds the camera to the pod. 0 keeps the horizon level.\n"
+                              "Pitch and yaw follow the pod either way. Lower this if the\n"
+                              "rolling is uncomfortable.");
+    }
     ImGui::Checkbox("Submit to headset", &g_s.submit_enabled);
     ImGui::Separator();
     ImGui::Text("controller actions: %s", g_actions_ready ? "attached" : "NOT attached");
@@ -2020,7 +2420,12 @@ void vr_probe_draw_imgui(void) {
         memcmp(&before.flare_angular_deg, &g_s.flare_angular_deg, sizeof(float)) != 0 ||
         memcmp(&before.weather_size_mul, &g_s.weather_size_mul, sizeof(float)) != 0 ||
         memcmp(&before.weather_streak_mul, &g_s.weather_streak_mul, sizeof(float)) != 0 ||
-        before.render_all_selectors != g_s.render_all_selectors) {
+        before.render_all_selectors != g_s.render_all_selectors ||
+        before.cockpit_view != g_s.cockpit_view ||
+        memcmp(&before.cockpit_up, &g_s.cockpit_up, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_back, &g_s.cockpit_back, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_right, &g_s.cockpit_right, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_roll, &g_s.cockpit_roll, sizeof(float)) != 0) {
         vr_settings_save();
     }
 }

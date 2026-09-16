@@ -46,6 +46,11 @@ extern "C" void hook_function(const char *function_name, uint32_t original_addre
 // press, never for a held key -- so a key held from the race-start menu press can't cascade.
 extern "C" int g_cutscene_skip_edge;
 
+// Reached by address: the hangar lookup and its menu-state setter, for the ini-driven
+// autostart below. Both are retail functions this file does not otherwise call.
+typedef void *(__cdecl *swrEvent_GetItemFn2)(int, int);
+typedef void(__cdecl *swrObjHang_SetMenuStateFn)(swrObjHang *, int);
+
 // Snapshot the freshly-loaded scene-animation state so a fast restart can restore it (defined in
 // the fast-restart section; called from InitTrack_delta after each real track load).
 static void capture_scene_animation_state();
@@ -239,7 +244,75 @@ static void vr_menu_key(int vk, bool down, int slot) {
     was[slot] = down;
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Auto-start a race from the ini. Harness aid: OFF unless [vr] autorace=1 is present.
+//
+// Unattended runs can only ever reach the menus, because choosing a planet, track and pod needs a
+// person -- so every frame-time measurement taken without a tester in the headset has been of the
+// front end, while the stalls being chased happen mid-race. This drives the same path the front
+// end does: fill in the hangar's race setup, then ask it to load.
+//
+// Waits for the hangar entity to exist AND for a settle delay, then fires exactly once. Firing
+// into a half-built menu state produces a crash that looks like a mod bug, which is a bad way to
+// spend an evening.
+// ---------------------------------------------------------------------------------------------
+static const char *autorace_ini_path(void) {
+    static char path[MAX_PATH] = {0};
+    if (path[0] == '\0') {
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        char *slash = strrchr(path, '\\');
+        if (slash)
+            slash[1] = '\0';
+        strncat(path, "SW_RACER_RE.ini", MAX_PATH - strlen(path) - 1);
+    }
+    return path;
+}
+
+static void autorace_tick(void) {
+    static int armed = -1;
+    static int fired = 0;
+    static int frames = 0;
+
+    if (fired)
+        return;
+    if (armed < 0)
+        armed = GetPrivateProfileIntA("vr", "autorace", 0, autorace_ini_path());
+    if (!armed)
+        return;
+
+    const int delay = GetPrivateProfileIntA("vr", "autorace_delay", 900, autorace_ini_path());
+    if (++frames < delay)
+        return;
+
+    swrObjHang *hang = (swrObjHang *) ((swrEvent_GetItemFn2) swrEvent_GetItem_ADDR)('Hang', 0);
+    if (hang == nullptr)
+        return;// front end not up yet; try again next frame
+
+    const int track = GetPrivateProfileIntA("vr", "autorace_track", 0, autorace_ini_path());
+    const int pod = GetPrivateProfileIntA("vr", "autorace_pod", 0, autorace_ini_path());
+    const int ai = GetPrivateProfileIntA("vr", "autorace_ai", 7, autorace_ini_path());
+    const int laps = GetPrivateProfileIntA("vr", "autorace_laps", 3, autorace_ini_path());
+
+    hang->track_index = (char) track;
+    hang->vehiclePlayer = (char) pod;
+    hang->num_players = (char) (ai + 1);
+    hang->numLaps = (char) laps;
+
+    fired = 1;
+    if (hook_log) {
+        fprintf(hook_log,
+                "[autorace] ARMED FROM INI - starting track %d, pod %d, %d racers, %d laps. "
+                "This is a harness aid, not the game misbehaving.\n",
+                track, pod, ai + 1, laps);
+        fflush(hook_log);
+    }
+    ((swrObjHang_SetMenuStateFn) swrObjHang_SetMenuState_ADDR)(hang, swrObjHang_STATE_LOAD_SCREEN);
+}
+
 void stdControl_ReadControls_boostfix_delta(void) {
+    vr_perf_mark("readControls");
+    autorace_tick();
     hook_call_original((stdControl_ReadControls_t) stdControl_ReadControls_ADDR);
 
     // With a wheel attached the game's own joystick handling makes menus unusable: the

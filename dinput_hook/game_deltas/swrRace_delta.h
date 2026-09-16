@@ -46,6 +46,16 @@ float swrRace_GetCableBendAmplitude(const swrModel_Node* node);
 // Drop all recorded cable nodes (call on track load so freed node pointers aren't reused).
 void swrRace_ClearCableBends();
 
+// Non-zero while cockpit view is the active camera stop -- the extra step this mod inserts
+// into the game's own view cycle, just after its first-person view. The camera override and
+// the rule that draws the local pod both key on this, so retail's first-person view keeps its
+// own camera and its hidden pod exactly as before.
+int vr_cockpit_step_active(void);
+
+// The camera manager's current mode_type, or -1 if it could not be read. Measured values:
+// 1 default chase, 2 far chase, 4 engine cam (retail first person), 5 bumper, 7 pre-race.
+int vr_camera_mode(void);
+
 // Post-race results handler. When the Pod Unlock Scene skip is on, stops the results flow from
 // transitioning to that scene while still doing the favorite-pilot unlock it would have done.
 void swrRace_ResultsMenu_delta(swrObjHang* hang);

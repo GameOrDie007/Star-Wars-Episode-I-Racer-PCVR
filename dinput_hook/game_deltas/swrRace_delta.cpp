@@ -314,7 +314,88 @@ extern "C" int vr_raw_axis(int i) {
     return (i >= 0 && i < 15) ? stdControl_aAxisPos[i] : 0;
 }
 
+// Cockpit view: an extra stop on the game's camera cycle, straight after the default chase.
+//
+//     default chase -> COCKPIT -> engine cam (retail 1st person) -> bumper -> far chase -> round
+//
+// Inserting HERE rather than taking over one of the pilot's-eye cameras matters: the underlying
+// camera stays the default chase, which does not hide the pod, so the pod is drawn around the
+// player with nothing to un-hide.
+//
+// Keyed on the camera manager's mode_type. POD_HIDDEN was tried first and is NOT readable at this
+// hook point -- it logged as 0 in every view including first person, because this runs before
+// whatever sets it and something clears it each frame.
+//
+// The mode numbers were measured by cycling the views and logging: 1 -> 4 -> 5 -> 2 -> 1 against
+// main chase -> 1st person -> bumper -> far chase. Only CAM_MODE_CHASE is acted on; the rest are
+// named for the reader and to make a wrong mapping obvious in a log.
+typedef void *(__cdecl *swrEvent_GetItemFn)(int, int);
+#define CMAN_EVENT 0x634d616e// 'cMan'
+
+enum {
+    CAM_MODE_CHASE = 1,     // default, behind the pod -- the one we insert after
+    CAM_MODE_FAR_CHASE = 2, // far behind
+    CAM_MODE_ENGINE = 4,    // retail's "first person", between the engines
+    CAM_MODE_BUMPER = 5,    // in front of the engines
+};
+
+static int g_cockpit_step = 0;
+static int g_camera_mode = -1;
+
+int vr_cockpit_step_active(void) {
+    return g_cockpit_step;
+}
+
+int vr_camera_mode(void) {
+    return g_camera_mode;
+}
+
+// Returns true when the view button must be hidden from the retail routine this frame, which is
+// what inserts our stop into the cycle without disturbing anything else in it.
+static bool cockpit_cycle_update(swrRace *player) {
+    static bool prev_down = false;
+    static bool suppress_until_release = false;
+
+    const void *cman = ((swrEvent_GetItemFn) swrEvent_GetItem_ADDR)(CMAN_EVENT, 0);
+    g_camera_mode = (cman != nullptr) ? ((const swrObjcMan *) cman)->mode_type : -1;
+
+    const bool view_down =
+        swrControl_viewButton != 0.0f || (inRaceLocalPlayerInputBitset1[0] & 0x4) != 0;
+    const bool down_edge = view_down && !prev_down;
+    prev_down = view_down;
+    if (!view_down)
+        suppress_until_release = false;
+
+    // Our stop only exists on top of the default chase camera. Any other mode means the game has
+    // moved on -- including a respawn or a cutscene taking the camera -- so stand down.
+    if (g_camera_mode != CAM_MODE_CHASE) {
+        g_cockpit_step = 0;
+        return false;
+    }
+
+    if (down_edge) {
+        if (g_cockpit_step) {
+            // Leaving our stop: let this press through and the game advances to the engine cam.
+            g_cockpit_step = 0;
+        } else {
+            // Entering it: absorb this press. The game stays on the chase camera and we take the
+            // view matrix, so the player is in the seat with the pod around them.
+            g_cockpit_step = 1;
+            suppress_until_release = true;
+        }
+    }
+    return suppress_until_release;
+}
+
 void __cdecl swrRace_UpdatePlayerControl_delta(swrRace* player) {
+    // Insert our stop into the camera cycle by absorbing one press of the view button while
+    // the default chase camera is up. Local player only -- this runs for every racer.
+    if (player != nullptr && (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0 &&
+        vr_cockpit_view() && cockpit_cycle_update(player)) {
+        swrControl_viewButton = 0.0f;
+        inRaceLocalPlayerInputBitset1[0] &= ~0x4;
+        inRaceLocalPlayerInputBitset1[1] &= ~0x4;
+    }
     if (player != nullptr && imgui_state.cheats_enabled &&
         (player->flags0 & swrObjTest_FLAG0_LOCAL) != 0) {
         if (imgui_state.cheat_boost_any_speed)

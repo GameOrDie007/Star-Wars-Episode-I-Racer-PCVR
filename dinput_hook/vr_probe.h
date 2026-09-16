@@ -145,6 +145,25 @@ float vr_input_stick_y(void);
 float vr_input_pitch(void);   // right stick Y: nose up / down
 float vr_input_pitch_x(void); // right stick X: menu left/right only
 int vr_input_view(void);      // left stick click: switch camera
+
+// Cockpit view. When vr_cockpit_view() is non-zero the renderer builds the view matrix from
+// the pod's own cockpit transform plus this seat offset, instead of the game's chase camera.
+// Per-eye render cost, reported by the renderer so the frame breakdown can separate the
+// game's own simulation from our scene traversal. Called once per eye pass.
+void vr_perf_note_eye_render(double ms);
+
+// Breadcrumb a point in the frame. Costs a timestamp and an array store. When a frame runs
+// long the whole timeline is dumped, so the gap that consumed the time names itself. Safe to
+// call from C.
+void vr_perf_mark(const char *name);
+
+int vr_cockpit_view(void);
+void vr_cockpit_seat_offset(float *up, float *back, float *right);
+// The local racer's pilot id (0..22), pushed from the renderer each frame so the seat offset
+// can be per-pod. Pods differ enough that one offset cannot fit all of them.
+void vr_cockpit_note_pod(int pod);
+int vr_cockpit_active_pod(void);
+float vr_cockpit_roll(void);
 int vr_input_lookback(void);  // X: look back
 int vr_input_slide(void);     // right stick click: slide
 int vr_input_repair(void);    // Y: repair

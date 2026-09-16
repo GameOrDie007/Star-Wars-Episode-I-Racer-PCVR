@@ -15,7 +15,7 @@ menus, and full Quest controller support - on a game with no available source, v
 | Runtime | Works? |
 |---|---|
 | **Virtual Desktop (VDXR)** | Yes - ships and registers a 32-bit runtime |
-| SteamVR | **No** - its OpenXR loader is 64-bit only |
+| SteamVR | **From 2.17 onward** - earlier versions were 64-bit only. Settings > OpenXR > *Set SteamVR as OpenXR Runtime*. Verified to offer the 32-bit OpenGL support this mod needs; not yet play-tested, so report anything odd |
 | Meta / Oculus PC runtime | Probably - documented as supporting 32-bit apps, untested here |
 
 The game is a 32-bit executable, so the VR runtime must be too. If your active OpenXR runtime has no

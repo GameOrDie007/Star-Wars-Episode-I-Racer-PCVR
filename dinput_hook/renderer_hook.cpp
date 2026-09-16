@@ -2245,7 +2245,26 @@ int current_fb_height = 0;
 
 // One eye's worth of scene. Runs twice per frame in VR, once flat -- see the
 // swrViewport_Render_Hook wrapper below.
+// Timed as a whole: this is the per-eye scene traversal and draw submission, which is the
+// half of REST that scales with stereo. See scripts/patch_eye_timing.py.
+struct EyeRenderTimer {
+    LARGE_INTEGER t0;
+    EyeRenderTimer() {
+        QueryPerformanceCounter(&t0);
+    }
+    ~EyeRenderTimer() {
+        LARGE_INTEGER t1, f;
+        QueryPerformanceCounter(&t1);
+        QueryPerformanceFrequency(&f);
+        if (f.QuadPart != 0)
+            vr_perf_note_eye_render(1000.0 * (double) (t1.QuadPart - t0.QuadPart) /
+                                    (double) f.QuadPart);
+    }
+};
+
 static void swrViewport_Render_Eye(int x) {
+    EyeRenderTimer _ert;
+    vr_perf_mark(x == 0 ? "eye0" : "eye1");
     // The pod's world bounds are only meaningful within one frame, and both eyes traverse the
     // same pod, so fold and reset on the first eye only.
     if (!vr_second_eye_pass())
@@ -2452,6 +2471,104 @@ static void swrViewport_Render_Eye(int x) {
 
     rdMatrix44 view_mat;
     rdMatrix_Copy44_34(&view_mat, &rdCamera_pCurCamera->view_matrix);
+
+    // Cockpit view: build the world->view matrix from the pod's own cockpit transform instead
+    // of the chase camera the game picked. See the note in scripts/patch_cockpit_view.py for
+    // where the conventions come from; briefly, these are ROW-VECTOR matrices (vA/vB/vC are the
+    // basis, vD the origin) and the game is X right, Y forward, Z up.
+    //
+    // currentPlayer_Test is the game's own in-race signal and is null outside a race -- the same
+    // test this file already uses to decide whether pod entities are safe to resolve. It is read
+    // fresh here and never cached: caching a player pointer is what crashed v1.2.
+    // Confirm the camera-mode mapping from where each camera actually IS, rather than from the
+    // order they were cycled in. The game's view matrix gives the camera's world position; the
+    // pod gives a reference point and a forward direction. A chase camera is behind (negative
+    // along forward), a bumper camera in front, a far chase much further back. One line per
+    // mode change turns an inferred mapping into a measured one.
+    if (hook_log != nullptr && currentPlayer_Test != nullptr) {
+        static int logged_mode = -12345;
+        const int cam_mode = vr_camera_mode();
+        if (cam_mode != logged_mode) {
+            logged_mode = cam_mode;
+            const rdMatrix44 &Cx = currentPlayer_Test->cockpitXf;
+            // Camera world position from a row-vector world->view matrix: -(vD * basis^T).
+            const float cx = -(view_mat.vA.x * view_mat.vD.x + view_mat.vA.y * view_mat.vD.y +
+                               view_mat.vA.z * view_mat.vD.z);
+            const float cy = -(view_mat.vB.x * view_mat.vD.x + view_mat.vB.y * view_mat.vD.y +
+                               view_mat.vB.z * view_mat.vD.z);
+            const float cz = -(view_mat.vC.x * view_mat.vD.x + view_mat.vC.y * view_mat.vD.y +
+                               view_mat.vC.z * view_mat.vD.z);
+            const float dx = cx - Cx.vD.x, dy = cy - Cx.vD.y, dz = cz - Cx.vD.z;
+            const float along = dx * Cx.vB.x + dy * Cx.vB.y + dz * Cx.vB.z;// + is in front
+            const float above = dx * Cx.vC.x + dy * Cx.vC.y + dz * Cx.vC.z;
+            fprintf(hook_log,
+                    "[cockpit] mode=%d camera vs pod: %.1f along (+front), %.1f up, %.1f away\n",
+                    cam_mode, along, above,
+                    sqrtf(dx * dx + dy * dy + dz * dz));
+            fflush(hook_log);
+        }
+    }
+
+    // Cockpit view is an extra stop on the game's own camera cycle (see swrRace_delta.cpp),
+    // inserted straight after the default chase camera.
+    // Tell the settings which pod is being flown, so the seat offset can be that pod's.
+    if (currentPlayer_Test != nullptr)
+        vr_cockpit_note_pod(swrObjJdge_localRacerId);
+    if (vr_cockpit_view() && currentPlayer_Test != nullptr && vr_cockpit_step_active()) {
+        const rdMatrix44 &C = currentPlayer_Test->cockpitXf;
+
+        float fwd[3] = {C.vB.x, C.vB.y, C.vB.z};
+        float pod_up[3] = {C.vC.x, C.vC.y, C.vC.z};
+        float side[3] = {C.vA.x, C.vA.y, C.vA.z};
+        const float fl = sqrtf(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+        const float ul = sqrtf(pod_up[0] * pod_up[0] + pod_up[1] * pod_up[1] + pod_up[2] * pod_up[2]);
+        const float sl = sqrtf(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
+        // A degenerate transform (a pod mid-respawn, say) must not produce a NaN camera.
+        if (fl > 1e-4f && ul > 1e-4f && sl > 1e-4f) {
+            for (int i = 0; i < 3; i++) {
+                fwd[i] /= fl;
+                pod_up[i] /= ul;
+                side[i] /= sl;
+            }
+
+            // The seat, in the pod's own frame, from the cockpit part's pivot.
+            float up_off = 0.0f, back_off = 0.0f, right_off = 0.0f;
+            vr_cockpit_seat_offset(&up_off, &back_off, &right_off);
+            const float eye[3] = {
+                C.vD.x + pod_up[0] * up_off - fwd[0] * back_off + side[0] * right_off,
+                C.vD.y + pod_up[1] * up_off - fwd[1] * back_off + side[1] * right_off,
+                C.vD.z + pod_up[2] * up_off - fwd[2] * back_off + side[2] * right_off};
+
+            // Roll attenuation. Blend the pod's up toward world up, then rebuild the basis
+            // around the UNCHANGED forward, so pitch and yaw are identical at every setting and
+            // only roll is affected.
+            const float k = vr_cockpit_roll();
+            float up_t[3] = {pod_up[0] * k, pod_up[1] * k, pod_up[2] * k + (1.0f - k)};
+            float r[3] = {fwd[1] * up_t[2] - fwd[2] * up_t[1], fwd[2] * up_t[0] - fwd[0] * up_t[2],
+                          fwd[0] * up_t[1] - fwd[1] * up_t[0]};
+            float rl = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            if (rl < 1e-3f) {
+                // Forward is parallel to the blended up (pod pointing straight up or down):
+                // there is no roll to attenuate, so take the pod's own basis unchanged.
+                r[0] = side[0]; r[1] = side[1]; r[2] = side[2];
+                rl = 1.0f;
+            }
+            for (int i = 0; i < 3; i++)
+                r[i] /= rl;
+            const float u[3] = {r[1] * fwd[2] - r[2] * fwd[1], r[2] * fwd[0] - r[0] * fwd[2],
+                                r[0] * fwd[1] - r[1] * fwd[0]};
+
+            // world->view is the inverse of the rigid camera->world [rows r,fwd,u | origin eye].
+            // For row-vector matrices that is the transposed basis, with -eye mapped through it.
+            view_mat.vA.x = r[0]; view_mat.vA.y = fwd[0]; view_mat.vA.z = u[0]; view_mat.vA.w = 0.0f;
+            view_mat.vB.x = r[1]; view_mat.vB.y = fwd[1]; view_mat.vB.z = u[1]; view_mat.vB.w = 0.0f;
+            view_mat.vC.x = r[2]; view_mat.vC.y = fwd[2]; view_mat.vC.z = u[2]; view_mat.vC.w = 0.0f;
+            view_mat.vD.x = -(eye[0] * r[0] + eye[1] * r[1] + eye[2] * r[2]);
+            view_mat.vD.y = -(eye[0] * fwd[0] + eye[1] * fwd[1] + eye[2] * fwd[2]);
+            view_mat.vD.z = -(eye[0] * u[0] + eye[1] * u[1] + eye[2] * u[2]);
+            view_mat.vD.w = 1.0f;
+        }
+    }
 
     rdMatrix44 rotation{
         {1, 0, 0, 0},
@@ -3160,12 +3277,20 @@ extern "C" int stdDisplay_Update_Hook() {
 
     vr_frame_end();// clear the submit flag only now that the whole frame is done
 
+    // The frame timeline says every slow frame spends its time between xrEndFrame and the next
+    // frame's input read -- 80 ms median, up to 1086 ms -- so the four things below are the
+    // suspects. A GPU fence and a buffer swap are both places a CPU thread blocks.
+    vr_perf_mark("ringFence");
     stream_ring_end_frame();// fence the ring region just written before this frame is presented
+    vr_perf_mark("swap");
     glfwSwapBuffers(glfwGetCurrentContext());
+    vr_perf_mark("afterSwap");
 
     crash_logger_heartbeat();// tell the hang watchdog a frame completed
 
+    vr_perf_mark("limitFps");
     limit_framerate(imgui_state.target_fps);
+    vr_perf_mark("frameDone");
 
     return 0;
 }

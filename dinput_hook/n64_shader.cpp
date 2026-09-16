@@ -4,6 +4,7 @@
 
 #include "n64_shader.h"
 #include <chrono>
+#include <vector>
 #include <format>
 #include <glad/glad.h>
 #include <map>
@@ -320,11 +321,36 @@ get_or_compile_color_combine_shader(ImGuiState &state,
         }
     }
 
+    // Force the driver to actually BUILD the program before timing it.
+    //
+    // glLinkProgram returns without compiling: NVIDIA defers the real work until the program is
+    // first used, so timing the link measured nothing and reported 0.1-0.5 ms while the true
+    // cost -- around 50 ms -- landed on whichever frame first drew with the material. That is
+    // invisible in a frame-time mean (one 50 ms frame in 300 moves it by 1.5%) and perfectly
+    // visible to a player as a dip.
+    //
+    // Retrieving the program binary forces completion. The binary itself is discarded here --
+    // though it is exactly what an on-disk shader cache would store, if this becomes one.
+    {
+        GLint binary_len = 0;
+        glGetProgramiv(program_opt.value(), GL_PROGRAM_BINARY_LENGTH, &binary_len);
+        if (binary_len > 0) {
+            std::vector<unsigned char> binary((size_t) binary_len);
+            GLenum binary_fmt = 0;
+            GLsizei written = 0;
+            glGetProgramBinary(program_opt.value(), binary_len, &written, &binary_fmt,
+                               binary.data());
+        }
+    }
+
     static int compile_count = 0;
+    static double compile_total_ms = 0.0;
     const double compile_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_begin)
             .count();
-    fprintf(hook_log, "n64 shader #%d compiled in %.1f ms\n", ++compile_count, compile_ms);
+    compile_total_ms += compile_ms;
+    fprintf(hook_log, "n64 shader #%d built in %.1f ms (%.1f ms total this session)\n",
+            ++compile_count, compile_ms, compile_total_ms);
     fflush(hook_log);
 
     return shader_map
