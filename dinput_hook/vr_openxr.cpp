@@ -263,6 +263,13 @@ struct VrState {
     // before, so adding this cannot regress anything already set.
     float cockpit_seat[23][3];
     int active_pod = -1;
+    // Look for a 32-bit runtime that works when the registered one does not. On by default:
+    // the alternative is a player staring at a flat game with no idea why.
+    int runtime_autodetect = 1;
+    // Seconds after which an unattended run closes itself, through the window's own close
+    // path so Main_Shutdown and the OpenXR teardown still run. 0 = never, the default and
+    // what every player has. A harness that needs a person to close it is not unattended.
+    float harness_quit_seconds = 0.0f;
     bool swap_eye_order = false;
     // 0.0 is the tested value; 1.0 was a default nobody has played with.
     float menu_shift = 0.0f;
@@ -440,6 +447,9 @@ static void vr_settings_load(void) {
     g_s.cockpit_back = vr_ini_get_f("cockpit_back", g_s.cockpit_back);
     g_s.cockpit_right = vr_ini_get_f("cockpit_right", g_s.cockpit_right);
     g_s.cockpit_roll = vr_ini_get_f("cockpit_roll", g_s.cockpit_roll);
+    g_s.runtime_autodetect =
+        (int) vr_ini_get_f("runtime_autodetect", (float) g_s.runtime_autodetect);
+    g_s.harness_quit_seconds = vr_ini_get_f("harness_quit_seconds", g_s.harness_quit_seconds);
     for (int i = 0; i < 23; i++) {
         char key[32];
         snprintf(key, sizeof(key), "cockpit_seat_%d", i);
@@ -605,6 +615,148 @@ static const char *xr_str(XrResult r) {
         }                                                                                          \
     } while (0)
 
+
+// ---- finding a 32-bit OpenXR runtime that actually works -------------------------------------
+//
+// Selecting a runtime per-process, through XR_RUNTIME_JSON, leaves the player's system-wide
+// choice alone. That is deliberate: someone whose desktop runtime is Meta keeps Meta for
+// everything else, and only this game uses something that can serve a 32-bit process.
+
+// Does this manifest exist AND name a library that is installed? Anything less is not a
+// candidate -- trying it would just reproduce the failure being recovered from.
+static bool runtime_manifest_usable(const char *manifest) {
+    if (manifest == nullptr || manifest[0] == '\0')
+        return false;
+    FILE *f = fopen(manifest, "rb");
+    if (f == nullptr)
+        return false;
+    char buf[8192] = {};
+    const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[got] = '\0';
+    const char *k = strstr(buf, "library_path");
+    if (k == nullptr)
+        return false;
+    const char *q = strchr(k + 12, '"');
+    q = (q != nullptr) ? strchr(q + 1, '"') : nullptr;
+    if (q == nullptr)
+        return false;
+    q++;
+    char lib[512] = {};
+    size_t n = 0;
+    for (; *q != '\0' && *q != '"' && n < sizeof(lib) - 1; q++) {
+        if (*q == '\\' && *(q + 1) == '\\')
+            q++;
+        lib[n++] = *q;
+    }
+    char full[1024] = {};
+    const bool absolute = (lib[1] == ':') || (lib[0] == '\\' && lib[1] == '\\');
+    if (absolute) {
+        snprintf(full, sizeof(full), "%s", lib);
+    } else {
+        snprintf(full, sizeof(full), "%s", manifest);
+        char *slash = strrchr(full, '\\');
+        char *fwd = strrchr(full, '/');
+        if (fwd != nullptr && (slash == nullptr || fwd > slash))
+            slash = fwd;
+        if (slash != nullptr)
+            *(slash + 1) = '\0';
+        else
+            full[0] = '\0';
+        strncat(full, lib, sizeof(full) - strlen(full) - 1);
+    }
+    const DWORD attr = GetFileAttributesA(full);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static void runtime_add_candidate(char list[][512], int *count, int max, const char *path) {
+    if (path == nullptr || path[0] == '\0' || *count >= max)
+        return;
+    for (int i = 0; i < *count; i++)
+        if (_stricmp(list[i], path) == 0)
+            return;// already queued
+    if (!runtime_manifest_usable(path))
+        return;
+    snprintf(list[*count], 512, "%s", path);
+    (*count)++;
+}
+
+static bool reg_read_str(HKEY root, const char *key, const char *value, DWORD flags, char *out,
+                         DWORD out_size) {
+    HKEY h = nullptr;
+    if (RegOpenKeyExA(root, key, 0, KEY_QUERY_VALUE | flags, &h) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 0, size = out_size - 1;
+    const LONG r = RegQueryValueExA(h, value, nullptr, &type, (LPBYTE) out, &size);
+    RegCloseKey(h);
+    if (r != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+        return false;
+    out[size < out_size ? size : out_size - 1] = '\0';
+    return out[0] != '\0';
+}
+
+// SteamVR is routinely installed on a different drive from Steam itself, so the library folders
+// have to be walked rather than assuming steamapps sits under the Steam install.
+static void runtime_add_steamvr(char list[][512], int *count, int max) {
+    char steam[512] = {};
+    if (!reg_read_str(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath", 0, steam,
+                      sizeof(steam)) &&
+        !reg_read_str(HKEY_LOCAL_MACHINE, "SOFTWARE\\Valve\\Steam", "InstallPath", KEY_WOW64_32KEY,
+                      steam, sizeof(steam)))
+        return;
+    for (char *p = steam; *p; p++)
+        if (*p == '/')
+            *p = '\\';
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s\\steamapps\\common\\SteamVR\\steamxr_win32.json", steam);
+    runtime_add_candidate(list, count, max, path);
+
+    char vdf[512];
+    snprintf(vdf, sizeof(vdf), "%s\\steamapps\\libraryfolders.vdf", steam);
+    FILE *f = fopen(vdf, "rb");
+    if (f == nullptr)
+        return;
+    char buf[16384] = {};
+    const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[got] = '\0';
+    // Each library is a "path"  "D:\\SteamLibrary" line; unescape the doubled separators.
+    for (const char *k = strstr(buf, "\"path\""); k != nullptr; k = strstr(k + 1, "\"path\"")) {
+        const char *q = strchr(k + 6, '"');
+        if (q == nullptr)
+            break;
+        q++;
+        char lib[512] = {};
+        size_t n = 0;
+        for (; *q != '\0' && *q != '"' && n < sizeof(lib) - 1; q++) {
+            if (*q == '\\' && *(q + 1) == '\\')
+                q++;
+            lib[n++] = *q;
+        }
+        if (lib[0] == '\0')
+            continue;
+        snprintf(path, sizeof(path), "%s\\steamapps\\common\\SteamVR\\steamxr_win32.json", lib);
+        runtime_add_candidate(list, count, max, path);
+    }
+}
+
+static void runtime_add_virtualdesktop(char list[][512], int *count, int max) {
+    static const char *roots[] = {"C:\\Program Files", "C:\\Program Files (x86)"};
+    char env[512] = {};
+    char path[512];
+    if (GetEnvironmentVariableA("ProgramW6432", env, sizeof(env) - 1) > 0 && env[0] != '\0') {
+        snprintf(path, sizeof(path),
+                 "%s\\Virtual Desktop Streamer\\OpenXR\\virtualdesktop-openxr-32.json", env);
+        runtime_add_candidate(list, count, max, path);
+    }
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        snprintf(path, sizeof(path),
+                 "%s\\Virtual Desktop Streamer\\OpenXR\\virtualdesktop-openxr-32.json", roots[i]);
+        runtime_add_candidate(list, count, max, path);
+    }
+}
+
 static bool load_loader(void) {
     // Next to the exe, same as openvr_api.dll was.
     const char *candidates[] = {"openxr_loader.dll"};
@@ -723,6 +875,61 @@ static void report_runtime_library(const char *manifest) {
         xr_logf("  refused to start -- usually its service is not running, or the headset is");
         xr_logf("  not connected. Start the headset link first, then launch the game.");
     }
+}
+
+
+// Load the loader and create an instance, trying other 32-bit runtimes if the configured one
+// cannot serve us. Retry stops at instance creation on purpose: nothing exists behind that stage
+// yet, so unloading the DLL is a complete teardown. A failure later -- no headset streaming, say
+// -- is a different problem, and swapping runtimes underneath it would answer the wrong question.
+static bool create_instance(void);
+static bool xr_bring_up(void) {
+    if (load_loader() && create_instance())
+        return true;
+
+    if (!g_s.runtime_autodetect) {
+        xr_logf("runtime autodetect is off (runtime_autodetect=0), so not looking further.");
+        return false;
+    }
+
+    char cands[8][512] = {};
+    int n = 0;
+    runtime_add_virtualdesktop(cands, &n, 8);
+    runtime_add_steamvr(cands, &n, 8);
+    if (n == 0) {
+        xr_logf("No other usable 32-bit OpenXR runtime found on this PC. Install Virtual Desktop,");
+        xr_logf("  or SteamVR 2.17 or newer, and this will pick it up by itself.");
+        return false;
+    }
+
+    xr_logf("Looking for a 32-bit runtime that works -- %d candidate%s on disk.", n,
+            n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        if (g_runtime_manifest[0] != '\0' && _stricmp(cands[i], g_runtime_manifest) == 0)
+            continue;// already tried, it is the one that just failed
+
+        // Full teardown of the only stage that exists yet.
+        if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance != nullptr)
+            p_xrDestroyInstance(g_instance);
+        g_instance = XR_NULL_HANDLE;
+        if (g_loader != nullptr)
+            FreeLibrary(g_loader);
+        g_loader = nullptr;
+        p_xrGetInstanceProcAddr = nullptr;
+        p_xrCreateInstance = nullptr;
+
+        xr_logf("  trying %s", cands[i]);
+        SetEnvironmentVariableA("XR_RUNTIME_JSON", cands[i]);
+        if (load_loader() && create_instance()) {
+            snprintf(g_runtime_manifest, sizeof(g_runtime_manifest), "%s", cands[i]);
+            xr_logf("  -> this one works. Using it for this game only; your system-wide OpenXR");
+            xr_logf("     runtime is unchanged. Set runtime_json in the [vr] block to pin it.");
+            return true;
+        }
+        xr_logf("  -> no.");
+    }
+    xr_logf("None of the runtimes on this PC could start a 32-bit OpenXR session.");
+    return false;
 }
 
 static void log_active_runtime(void) {
@@ -1139,7 +1346,7 @@ static void try_init(void) {
         return;
     }
 
-    if (!load_loader() || !create_instance() || !create_session_and_swapchains()) {
+    if (!xr_bring_up() || !create_session_and_swapchains()) {
         // Two very different situations, and telling them apart is the whole value of this
         // message: there is no runtime to talk to, or there is one and it refused us.
         if (!g_have_32bit_runtime) {
@@ -1455,6 +1662,10 @@ void vr_get_target_size(unsigned int *width, unsigned int *height) {
         *width = g_eye[0].width;
     if (height)
         *height = g_eye[0].height;
+}
+
+float vr_harness_quit_seconds(void) {
+    return g_s.harness_quit_seconds;
 }
 
 int vr_eye_count(void) {

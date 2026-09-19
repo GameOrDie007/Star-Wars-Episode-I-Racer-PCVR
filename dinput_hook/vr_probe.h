@@ -46,6 +46,10 @@ void vr_get_target_size(unsigned int *width, unsigned int *height);
 // How many times the scene must be drawn this frame: 2 in VR, 1 flat.
 int vr_eye_count(void);
 
+// Seconds until an unattended run closes itself; 0 = never (the default). A harness that
+// needs a person in the room to close it is not unattended.
+float vr_harness_quit_seconds(void);
+
 // Which eye the renderer is currently drawing. Set by the render loop, read by the projection
 // and view-matrix code.
 void vr_set_current_eye(int eye);

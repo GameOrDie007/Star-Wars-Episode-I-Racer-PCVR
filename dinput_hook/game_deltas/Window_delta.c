@@ -588,10 +588,16 @@ int Window_Main_delta(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLin
     // be tied to an exact call site.
     glDebugMessageCallback(Window_glDebugMessageCallback, 0);
 
+    const float quit_after_s = vr_harness_quit_seconds();
+    const DWORD loop_start_ms = GetTickCount();
+
     while (!glfwWindowShouldClose(window)) {
         vr_perf_mark("guiAdvance");
         swrMain2_GuiAdvance();
         vr_perf_mark("pollEvents");
+        if (quit_after_s > 0.0f &&
+            (double) (GetTickCount() - loop_start_ms) / 1000.0 >= (double) quit_after_s)
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
 #if !ENABLE_GLFW_INPUT_HANDLING
         // if glfw input handling is enabled, glfwPollEvents is called in stdControl_ReadControls
         // instead. this is important for the timing of the input state.
