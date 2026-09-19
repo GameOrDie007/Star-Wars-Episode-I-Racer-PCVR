@@ -49,6 +49,10 @@ int vr_eye_count(void);
 // Seconds until an unattended run closes itself; 0 = never (the default). A harness that
 // needs a person in the room to close it is not unattended.
 float vr_harness_quit_seconds(void);
+// Whether to declare the process DPI-unaware before GLFW. 1 = yes (default, v1.4 behaviour:
+// smaller window, smaller render target, more frame time). 0 = render at the display's
+// physical resolution, which is sharper in the headset and costs performance.
+int vr_want_dpi_unaware(void);
 
 // Which eye the renderer is currently drawing. Set by the render loop, read by the projection
 // and view-matrix code.

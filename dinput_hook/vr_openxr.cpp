@@ -440,6 +440,15 @@ static void vr_ini_set_b(const char *key, bool v) {
     WritePrivateProfileStringA("vr", key, v ? "1" : "0", vr_ini_path());
 }
 
+// Asked before glfwInit, which is long before the settings are loaded, so it reads the ini
+// directly rather than g_s. 1 (the default) keeps v1.4's behaviour: the process is DPI-
+// unaware, so on a scaled display the window -- and therefore the render target and the
+// headset image -- is the LOGICAL size. That is a real resolution cut in exchange for frame
+// time, and v1.4 shipped it with no way to decline. 0 restores the physical size.
+extern "C" int vr_want_dpi_unaware(void) {
+    return GetPrivateProfileIntA("vr", "dpi_unaware", 1, vr_ini_path());
+}
+
 static void vr_settings_load(void) {
     g_s.world_units_per_metre = vr_ini_get_f("world_units_per_metre", g_s.world_units_per_metre);
     g_s.cockpit_view = vr_ini_get_b("cockpit_view", g_s.cockpit_view);

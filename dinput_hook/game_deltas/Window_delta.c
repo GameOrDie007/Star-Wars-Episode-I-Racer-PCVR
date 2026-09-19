@@ -543,7 +543,15 @@ int Window_Main_delta(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR pCmdLin
         HMODULE u32 = GetModuleHandleW(L"user32.dll");
         SetCtxFn set_ctx =
             u32 ? (SetCtxFn) GetProcAddress(u32, "SetProcessDpiAwarenessContext") : NULL;
-        const BOOL ok = set_ctx ? set_ctx((HANDLE) -1 /* DPI_AWARENESS_CONTEXT_UNAWARE */) : FALSE;
+        const int want = vr_want_dpi_unaware();
+        const BOOL ok =
+            (want && set_ctx) ? set_ctx((HANDLE) -1 /* DPI_AWARENESS_CONTEXT_UNAWARE */) : FALSE;
+        if (!want && hook_log != NULL) {
+            fprintf(hook_log,
+                    "[window] dpi_unaware=0: rendering at the display's PHYSICAL resolution."
+                    " Sharper in the headset, and more expensive.\n");
+            fflush(hook_log);
+        }
         if (hook_log != NULL) {
             fprintf(hook_log, "[window] DPI unaware: %s\n",
                     ok ? "yes" : (set_ctx ? "REFUSED (awareness already set)" : "no API"));
