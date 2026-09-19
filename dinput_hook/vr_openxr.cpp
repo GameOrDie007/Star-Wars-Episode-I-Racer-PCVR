@@ -2813,8 +2813,14 @@ void vr_probe_draw_imgui(void) {
     ImGui::Text("yaw %+7.2f  pitch %+7.2f  roll %+7.2f", g_s.yaw_deg, g_s.pitch_deg, g_s.roll_deg);
     ImGui::Text("pos %+6.3f %+6.3f %+6.3f m", g_s.pos_x, g_s.pos_y, g_s.pos_z);
     ImGui::Separator();
-    ImGui::SliderFloat("World units per metre", &g_s.world_units_per_metre, 1.0f, 200.0f, "%.1f",
-                       ImGuiSliderFlags_Logarithmic);
+    // Floor 0.2, not 1.0. A player who found the world too small needed 0.8 -- three times
+    // larger than the default -- and the old floor put that out of reach of the slider
+    // entirely, so the only way to it was hand-editing the ini or scaling in SteamVR, which
+    // costs the performance of leaving VDXR. A control that cannot reach a setting people
+    // legitimately want is not a control.
+    ImGui::SliderFloat("World units per metre", &g_s.world_units_per_metre, 0.2f, 200.0f,
+                       "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::TextDisabled("Lower = the world looks BIGGER. Default 2.4; 0.8 is three times life size.");
     {
         // Turn the scale into something checkable. A podracer is about 7 m long, so adjust the
         // slider until this reads roughly that and the world is correctly sized -- far easier
@@ -2824,9 +2830,18 @@ void vr_probe_draw_imgui(void) {
         if (units > 0.0f) {
             const float scale =
                 (g_s.world_units_per_metre > 0.01f) ? g_s.world_units_per_metre : 1.0f;
-            ImGui::Text("pod spans %.0f units = %.1f m  (a podracer is ~7 m)", units,
-                        units / scale);
-            ImGui::Text("  -> %.1f units/m would make it 7 m", units / 7.0f);
+            // An ENGINE is 7 m; the cockpit is 3.15 m; the whole rig is engines plus cables
+            // plus cockpit and has no figure anyone can cite. The old default compared the
+            // WHOLE vehicle against the ENGINE's 7 m, which made the world about a third of
+            // life size for everyone. Set the scale by the engine line.
+            const float part = vr_measured_pod_part();
+            if (part > 0.0f) {
+                ImGui::Text("largest part %.1f units = %.1f m   (an engine is 7 m)", part,
+                            part / scale);
+                ImGui::Text("  -> %.2f units/m sizes the world correctly", part / 7.0f);
+            }
+            ImGui::TextDisabled("whole vehicle %.0f units = %.1f m (engines + cables +"
+                                " cockpit)", units, units / scale);
             // Second, independent check: in cockpit view the engines are a few metres ahead.
             ImGui::Text("eye to pod %.0f units = %.1f m", dist, dist / scale);
         } else {

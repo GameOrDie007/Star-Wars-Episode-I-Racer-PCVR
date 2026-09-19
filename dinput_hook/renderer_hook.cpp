@@ -296,11 +296,17 @@ struct PodGroup {
     float origin[3];
     float mn[3];
     float mx[3];
+    // Longest axis of the biggest SINGLE mesh in this group. The whole-vehicle box has no
+    // citable real-world length -- it depends on how far the cockpit trails on its cables --
+    // but the largest single part of a podracer is an engine, and an engine is 7 m. That
+    // makes this the only measurement here with a canonical figure to compare against.
+    float biggest_part;
 };
 static PodGroup g_pod_groups[VR_POD_GROUPS];
 static int g_pod_group_count = 0;
 static float g_pod_extent_units = 0.0f;// finalised once per frame
 static float g_pod_distance_units = 0.0f;
+static float g_pod_part_units = 0.0f;// biggest single part: an engine, canonically 7 m
 
 // Fold this frame's groups into the reported figures and start again. The pods move, so the bounds
 // are only meaningful within a single frame. The group NEAREST the camera is the one measured --
@@ -333,6 +339,7 @@ static void finalise_pod_measurement() {
         if (longest > 0.0f) {
             g_pod_extent_units = longest;
             g_pod_distance_units = sqrtf(best_d2);
+            g_pod_part_units = p.biggest_part;
         }
     }
     g_pod_group_count = 0;
@@ -466,6 +473,10 @@ static bool vr_hud_layer_ensure(int w, int h) {
 
 extern "C" float vr_measured_pod_extent(void) {
     return g_pod_extent_units;
+}
+
+extern "C" float vr_measured_pod_part(void) {
+    return g_pod_part_units;
 }
 
 extern "C" float vr_measured_pod_distance(void) {
@@ -1128,10 +1139,15 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
                 g_pod_groups[grp].mn[0] = g_pod_groups[grp].mx[0] = ox;
                 g_pod_groups[grp].mn[1] = g_pod_groups[grp].mx[1] = oy;
                 g_pod_groups[grp].mn[2] = g_pod_groups[grp].mx[2] = oz;
+                g_pod_groups[grp].biggest_part = 0.0f;
             }
 
             if (grp >= 0) {
                 PodGroup &p = g_pod_groups[grp];
+                // This mesh's own world-space box, kept separately from the group's. One
+                // part has a real dimension behind it; the assembled vehicle does not.
+                float pmn[3] = {1e30f, 1e30f, 1e30f};
+                float pmx[3] = {-1e30f, -1e30f, -1e30f};
                 for (int c = 0; c < 8; c++) {
                     const float lx = (c & 1) ? aabb[3] : aabb[0];
                     const float ly = (c & 2) ? aabb[4] : aabb[1];
@@ -1154,7 +1170,26 @@ void debug_render_mesh(const swrModel_Mesh *mesh, int light_index, int num_enabl
                         p.mx[1] = wy;
                     if (wz > p.mx[2])
                         p.mx[2] = wz;
+                    if (wx < pmn[0])
+                        pmn[0] = wx;
+                    if (wy < pmn[1])
+                        pmn[1] = wy;
+                    if (wz < pmn[2])
+                        pmn[2] = wz;
+                    if (wx > pmx[0])
+                        pmx[0] = wx;
+                    if (wy > pmx[1])
+                        pmx[1] = wy;
+                    if (wz > pmx[2])
+                        pmx[2] = wz;
                 }
+                const float pex = pmx[0] - pmn[0];
+                const float pey = pmx[1] - pmn[1];
+                const float pez = pmx[2] - pmn[2];
+                const float plong =
+                    (pex > pey) ? ((pex > pez) ? pex : pez) : ((pey > pez) ? pey : pez);
+                if (plong > p.biggest_part)
+                    p.biggest_part = plong;
             }
         }
     }

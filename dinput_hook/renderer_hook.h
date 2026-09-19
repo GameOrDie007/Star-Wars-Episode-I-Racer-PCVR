@@ -32,6 +32,9 @@ extern "C" int vr_imgui_target(unsigned int *fbo, int *w, int *h);
 // gives the world scale directly, instead of judging stereo depth by eye -- which is a genuinely
 // hard thing to eyeball and was picked while the image was still broken.
 extern "C" float vr_measured_pod_extent(void);
+// Longest axis of the biggest single part of the nearest pod -- an engine, which is 7 m
+// canonically. The only pod measurement with a citable real dimension behind it.
+extern "C" float vr_measured_pod_part(void);
 
 // Distance from the eye to the pod, in GAME UNITS. In cockpit view the engines are a few
 // metres ahead, so this cross-checks the scale independently of the pod's own bounds.
