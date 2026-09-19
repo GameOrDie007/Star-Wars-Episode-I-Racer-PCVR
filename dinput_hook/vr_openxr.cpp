@@ -597,11 +597,50 @@ static void set_status(const char *s) {
     snprintf(g_s.status, sizeof(g_s.status), "%s", s);
 }
 
+// The runtime can only name a result through an INSTANCE, so every failure that happens
+// while creating one printed as a bare number -- and "XrResult -32" is unreadable to the person
+// who has to act on it. -32 is XR_ERROR_FILE_ACCESS_ERROR, which sent a user hunting the runtime
+// when the unreadable file was a broken API layer. Codes that matter before an instance exists.
+static const char *xr_str_local(XrResult r) {
+    switch ((int) r) {
+        case -1: return "XR_ERROR_VALIDATION_FAILURE";
+        case -2: return "XR_ERROR_RUNTIME_FAILURE";
+        case -3: return "XR_ERROR_OUT_OF_MEMORY";
+        case -4: return "XR_ERROR_API_VERSION_UNSUPPORTED";
+        case -6: return "XR_ERROR_INITIALIZATION_FAILED";
+        case -7: return "XR_ERROR_FUNCTION_UNSUPPORTED";
+        case -8: return "XR_ERROR_FEATURE_UNSUPPORTED";
+        case -9: return "XR_ERROR_EXTENSION_NOT_PRESENT";
+        case -10: return "XR_ERROR_LIMIT_REACHED";
+        case -11: return "XR_ERROR_SIZE_INSUFFICIENT";
+        case -12: return "XR_ERROR_HANDLE_INVALID";
+        case -13: return "XR_ERROR_INSTANCE_LOST";
+        case -18: return "XR_ERROR_SYSTEM_INVALID";
+        case -23: return "XR_ERROR_LAYER_INVALID";
+        case -24: return "XR_ERROR_LAYER_LIMIT_EXCEEDED";
+        case -32: return "XR_ERROR_FILE_ACCESS_ERROR (a manifest or DLL could not be read)";
+        case -33: return "XR_ERROR_FILE_CONTENTS_INVALID";
+        case -34: return "XR_ERROR_FORM_FACTOR_UNSUPPORTED";
+        case -35: return "XR_ERROR_FORM_FACTOR_UNAVAILABLE (no headset is streaming)";
+        case -36: return "XR_ERROR_API_LAYER_NOT_PRESENT";
+        case -37: return "XR_ERROR_CALL_ORDER_INVALID";
+        case -38: return "XR_ERROR_GRAPHICS_DEVICE_INVALID";
+        case -50: return "XR_ERROR_NAME_INVALID";
+        case -51: return "XR_ERROR_RUNTIME_UNAVAILABLE (registered, but it would not start)";
+        default: return nullptr;
+    }
+}
+
 static const char *xr_str(XrResult r) {
     static char buf[XR_MAX_RESULT_STRING_SIZE];
     if (p_xrResultToString && g_instance != XR_NULL_HANDLE &&
         p_xrResultToString(g_instance, r, buf) == XR_SUCCESS)
         return buf;
+    const char *known = xr_str_local(r);
+    if (known != nullptr) {
+        snprintf(buf, sizeof(buf), "%s (%d)", known, (int) r);
+        return buf;
+    }
     snprintf(buf, sizeof(buf), "XrResult %d", (int) r);
     return buf;
 }
@@ -883,6 +922,162 @@ static void report_runtime_library(const char *manifest) {
 // yet, so unloading the DLL is a complete teardown. A failure later -- no headset streaming, say
 // -- is a different problem, and swapping runtimes underneath it would answer the wrong question.
 static bool create_instance(void);
+
+// ---- OpenXR API layers -----------------------------------------------------------------------
+//
+// Layers are injected into every OpenXR application from their own registry keys. A broken one
+// breaks every runtime equally, which is why a user who tried Virtual Desktop, Steam Link and
+// Meta Link in turn saw the same failure each time: the runtime was never the variable.
+//
+// The loader spec gives every implicit layer a `disable_environment` in its manifest. Setting
+// that variable makes the loader skip the layer -- for this process only, so the player's
+// layers stay installed and enabled for everything else they own.
+
+typedef struct {
+    char manifest[512];
+    char name[128];
+    char disable_env[128];
+    DWORD disabled;// registry value: 0 = active, non-zero = already off
+    bool manifest_ok;
+    bool library_ok;
+} XrLayer;
+
+// Pull one quoted string value out of a manifest. The shape is fixed by the loader spec, so a
+// full parser buys nothing a caller can use.
+static bool layer_json_str(const char *json, const char *key, char *out, size_t out_size) {
+    const char *k = strstr(json, key);
+    if (k == nullptr)
+        return false;
+    // `key` is searched WITH its quotes, so k + strlen(key) is already past the key's closing
+    // quote. The next quote is therefore the value's OPENING one, and skipping a second would
+    // land past the value entirely -- which is exactly what it did, returning the punctuation
+    // after each field instead of the field.
+    const char *q = strchr(k + strlen(key), '"');
+    if (q == nullptr)
+        return false;
+    q++;
+    size_t n = 0;
+    for (; *q != '\0' && *q != '"' && n < out_size - 1; q++) {
+        if (*q == '\\' && *(q + 1) == '\\')
+            q++;
+        out[n++] = *q;
+    }
+    out[n] = '\0';
+    return n > 0;
+}
+
+static void layer_read_manifest(XrLayer *L) {
+    FILE *f = fopen(L->manifest, "rb");
+    if (f == nullptr) {
+        L->manifest_ok = false;
+        return;
+    }
+    L->manifest_ok = true;
+    char buf[8192] = {};
+    const size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[got] = '\0';
+    layer_json_str(buf, "\"name\"", L->name, sizeof(L->name));
+    layer_json_str(buf, "\"disable_environment\"", L->disable_env, sizeof(L->disable_env));
+
+    char lib[512] = {};
+    L->library_ok = false;
+    if (layer_json_str(buf, "\"library_path\"", lib, sizeof(lib))) {
+        char full[1024] = {};
+        const bool absolute = (lib[1] == ':') || (lib[0] == '\\' && lib[1] == '\\');
+        if (absolute) {
+            snprintf(full, sizeof(full), "%s", lib);
+        } else {
+            snprintf(full, sizeof(full), "%s", L->manifest);
+            char *slash = strrchr(full, '\\');
+            char *fwd = strrchr(full, '/');
+            if (fwd != nullptr && (slash == nullptr || fwd > slash))
+                slash = fwd;
+            if (slash != nullptr)
+                *(slash + 1) = '\0';
+            else
+                full[0] = '\0';
+            strncat(full, lib, sizeof(full) - strlen(full) - 1);
+        }
+        const DWORD attr = GetFileAttributesA(full);
+        L->library_ok = attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+}
+
+static int enum_implicit_layers_from(HKEY root, const char *subkey, DWORD flags, XrLayer *out,
+                                     int have, int max) {
+    HKEY h = nullptr;
+    if (RegOpenKeyExA(root, subkey, 0, KEY_QUERY_VALUE | flags, &h) != ERROR_SUCCESS)
+        return have;
+    for (DWORD i = 0;; i++) {
+        char name[512] = {};
+        DWORD name_len = sizeof(name) - 1;
+        DWORD type = 0, data = 0, data_len = sizeof(data);
+        const LONG r = RegEnumValueA(h, i, name, &name_len, nullptr, &type, (LPBYTE) &data,
+                                     &data_len);
+        if (r != ERROR_SUCCESS)
+            break;
+        if (have >= max)
+            break;
+        bool dup = false;
+        for (int j = 0; j < have; j++)
+            if (_stricmp(out[j].manifest, name) == 0)
+                dup = true;
+        if (dup)
+            continue;
+        XrLayer *L = &out[have];
+        memset(L, 0, sizeof(*L));
+        snprintf(L->manifest, sizeof(L->manifest), "%s", name);
+        L->disabled = (type == REG_DWORD) ? data : 0;
+        layer_read_manifest(L);
+        have++;
+    }
+    RegCloseKey(h);
+    return have;
+}
+
+static int enum_implicit_layers(XrLayer *out, int max) {
+    const char *key = "SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit";
+    int n = 0;
+    n = enum_implicit_layers_from(HKEY_LOCAL_MACHINE, key, KEY_WOW64_32KEY, out, n, max);
+    n = enum_implicit_layers_from(HKEY_LOCAL_MACHINE, key, KEY_WOW64_64KEY, out, n, max);
+    n = enum_implicit_layers_from(HKEY_CURRENT_USER, key, 0, out, n, max);
+    return n;
+}
+
+// Report them the way the runtime is reported: what is there, and whether its files exist.
+static int log_implicit_layers(XrLayer *layers, int max) {
+    const int n = enum_implicit_layers(layers, max);
+    if (n == 0) {
+        xr_logf("OpenXR API layers: none installed.");
+        return 0;
+    }
+    xr_logf("OpenXR API layers: %d installed. These are injected into EVERY OpenXR app, so a", n);
+    xr_logf("  broken one fails every runtime identically -- swapping runtimes will not help.");
+    for (int i = 0; i < n; i++) {
+        const XrLayer *L = &layers[i];
+        xr_logf("  [%d] %s", i, L->name[0] ? L->name : "(unnamed)");
+        xr_logf("      manifest: %s%s", L->manifest, L->manifest_ok ? "" : "  -- NOT FOUND");
+        if (L->manifest_ok && !L->library_ok)
+            xr_logf("      library : MISSING -- this layer cannot load and will break OpenXR apps");
+        xr_logf("      state   : %s", L->disabled ? "disabled in the registry" : "ACTIVE");
+    }
+    return n;
+}
+
+// Set every implicit layer's own disable variable, per the loader spec. Returns how many could
+// actually be switched off -- a layer whose manifest is unreadable has no name to set.
+static int disable_implicit_layers(const XrLayer *layers, int n) {
+    int off = 0;
+    for (int i = 0; i < n; i++) {
+        if (layers[i].disable_env[0] == '\0')
+            continue;
+        SetEnvironmentVariableA(layers[i].disable_env, "1");
+        off++;
+    }
+    return off;
+}
+
 static bool xr_bring_up(void) {
     if (load_loader() && create_instance())
         return true;
@@ -890,6 +1085,35 @@ static bool xr_bring_up(void) {
     if (!g_s.runtime_autodetect) {
         xr_logf("runtime autodetect is off (runtime_autodetect=0), so not looking further.");
         return false;
+    }
+
+    // API layers first. A broken layer fails every runtime identically, so trying other
+    // runtimes before ruling layers out would "fix" the player by quietly moving them to a
+    // different runtime while the real fault stays in place for every other VR title they own.
+    XrLayer layers[16] = {};
+    const int layer_count = log_implicit_layers(layers, 16);
+    if (layer_count > 0) {
+        const int off = disable_implicit_layers(layers, layer_count);
+        if (off > 0) {
+            xr_logf("Retrying with %d API layer%s switched off for this process only.", off,
+                    off == 1 ? "" : "s");
+            if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance != nullptr)
+                p_xrDestroyInstance(g_instance);
+            g_instance = XR_NULL_HANDLE;
+            if (g_loader != nullptr)
+                FreeLibrary(g_loader);
+            g_loader = nullptr;
+            p_xrGetInstanceProcAddr = nullptr;
+            p_xrCreateInstance = nullptr;
+            if (load_loader() && create_instance()) {
+                xr_logf("  -> that was it: one of your OpenXR API layers was blocking startup.");
+                xr_logf("     The game works now, but the layer is still broken for every other");
+                xr_logf("     VR app. Uncheck or uninstall it -- ReShade's OpenXR layer is the");
+                xr_logf("     usual culprit, and fredemmott's OpenXR-API-Layers-GUI lists them.");
+                return true;
+            }
+            xr_logf("  -> no, the layers were not the problem.");
+        }
     }
 
     char cands[8][512] = {};
