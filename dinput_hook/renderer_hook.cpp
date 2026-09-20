@@ -2689,8 +2689,30 @@ static void swrViewport_Render_Eye(int x) {
             }
             for (int i = 0; i < 3; i++)
                 r[i] /= rl;
-            const float u[3] = {r[1] * fwd[2] - r[2] * fwd[1], r[2] * fwd[0] - r[0] * fwd[2],
-                                r[0] * fwd[1] - r[1] * fwd[0]};
+            float u[3] = {r[1] * fwd[2] - r[2] * fwd[1], r[2] * fwd[0] - r[0] * fwd[2],
+                          r[0] * fwd[1] - r[1] * fwd[0]};
+
+            // Look back (X) while in cockpit view.
+            //
+            // This worked before cockpit view existed and quietly stopped when it arrived: the
+            // game swings its own camera round for look-back, and this block replaces the
+            // game's camera outright with one built from the pod. So the game still entered
+            // look-back -- changing what it draws of the pod, which is the only thing players
+            // could see happening -- while the view never turned. A user reported "a haptic,
+            // the lightning between the engines disappears, and nothing else", which is exactly
+            // that.
+            //
+            // Turning the seat rather than the pod: negate forward and right, keep up. Head
+            // tracking composes on top as usual, so you can still look around while reversed.
+            if (vr_input_lookback()) {
+                for (int i = 0; i < 3; i++) {
+                    fwd[i] = -fwd[i];
+                    r[i] = -r[i];
+                }
+                u[0] = r[1] * fwd[2] - r[2] * fwd[1];
+                u[1] = r[2] * fwd[0] - r[0] * fwd[2];
+                u[2] = r[0] * fwd[1] - r[1] * fwd[0];
+            }
 
             // world->view is the inverse of the rigid camera->world [rows r,fwd,u | origin eye].
             // For row-vector matrices that is the transposed basis, with -eye mapped through it.
