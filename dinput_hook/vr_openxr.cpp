@@ -590,9 +590,31 @@ void vr_settings_save(void) {
     vr_ini_set_b("wheel_invert", g_s.wheel_invert);
 }
 
+// The VR lines also go to a file of their own. In hook.log they start around line 2500 of
+// 4000, under the hook registration, and four support threads in a row have stalled on getting
+// them out of it -- including one where I asked for "the first 15 lines" and received fifteen
+// lines of patch messages, because what I wanted was two thousand lines further down. A user
+// cannot be expected to know that. vr_report.txt is a few dozen lines they can send whole.
+static FILE *vr_report = nullptr;
+
 static void xr_logf(const char *fmt, ...) {
     if (!hook_log)
         return;
+    if (vr_report == nullptr) {
+        // Beside hook.log, in the game folder, truncated each launch so it always describes
+        // THIS run rather than accumulating sessions nobody can tell apart.
+        char path[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        char *slash = strrchr(path, '\\');
+        if (slash != nullptr)
+            slash[1] = '\0';
+        strncat(path, "vr_report.txt", MAX_PATH - strlen(path) - 1);
+        vr_report = fopen(path, "w");
+        if (vr_report != nullptr) {
+            fprintf(vr_report, "Star Wars Episode I Racer PCVR -- VR startup report\n");
+            fprintf(vr_report, "Send this whole file when VR will not start.\n\n");
+        }
+    }
     va_list args;
     va_start(args, fmt);
     fprintf(hook_log, "[XR] ");
@@ -600,6 +622,14 @@ static void xr_logf(const char *fmt, ...) {
     fprintf(hook_log, "\n");
     va_end(args);
     fflush(hook_log);
+    if (vr_report != nullptr) {
+        va_list a2;
+        va_start(a2, fmt);
+        vfprintf(vr_report, fmt, a2);
+        fprintf(vr_report, "\n");
+        va_end(a2);
+        fflush(vr_report);
+    }
 }
 
 static void set_status(const char *s) {
@@ -610,6 +640,9 @@ static void set_status(const char *s) {
 // while creating one printed as a bare number -- and "XrResult -32" is unreadable to the person
 // who has to act on it. -32 is XR_ERROR_FILE_ACCESS_ERROR, which sent a user hunting the runtime
 // when the unreadable file was a broken API layer. Codes that matter before an instance exists.
+// The failing result, kept so the advice can be keyed to it instead of listing every cause.
+static XrResult g_last_init_result = XR_SUCCESS;
+
 static const char *xr_str_local(XrResult r) {
     switch ((int) r) {
         case -1: return "XR_ERROR_VALIDATION_FAILURE";
@@ -858,6 +891,40 @@ static char g_runtime_manifest[512] = {};
 // actually installed. A manifest naming a missing library is the most common cause of
 // XR_ERROR_RUNTIME_UNAVAILABLE, and it is invisible from the outside: the runtime looks
 // registered, the headset works in every other title, and nothing says why this one failed.
+// Advice keyed to the actual result. One paragraph guessing at every cause told a user whose
+// GRAPHICS DEVICE had been rejected that his headset service was not running -- a different
+// problem with a different fix, and a wasted support round.
+static void advise_for_result(XrResult r) {
+    switch ((int) r) {
+        case -38:// XR_ERROR_GRAPHICS_DEVICE_INVALID
+            xr_logf("  The runtime REJECTED THE GRAPHICS DEVICE. This is not a missing runtime");
+            xr_logf("  and not the headset link: the runtime answered, and refused the OpenGL");
+            xr_logf("  context. Almost always the game is running on a different GPU from the");
+            xr_logf("  one driving the headset. Look at the 'graphics:' line above -- if it");
+            xr_logf("  names an integrated adapter (Intel, or AMD Radeon Graphics) instead of");
+            xr_logf("  your discrete card, that is the fault, and it also explains a low frame");
+            xr_logf("  rate in flat mode.");
+            xr_logf("  Fix: Windows Settings > System > Display > Graphics, add SWEP1RCR.EXE");
+            xr_logf("  and set it to High performance. NVIDIA Control Panel > Manage 3D");
+            xr_logf("  settings > Program Settings does the same job.");
+            break;
+        case -35:// XR_ERROR_FORM_FACTOR_UNAVAILABLE
+            xr_logf("  No headset was available when the game started. Connect it and start");
+            xr_logf("  streaming FIRST, then launch the game.");
+            break;
+        case -51:// XR_ERROR_RUNTIME_UNAVAILABLE
+            xr_logf("  The runtime is registered but would not start -- usually its service is");
+            xr_logf("  not running, or the headset is not connected.");
+            break;
+        default:
+            xr_logf("  If the headset is connected and streaming, the next thing to try is a");
+            xr_logf("  different runtime -- see the routes below.");
+            break;
+    }
+    xr_logf("  Note: Virtual Desktop and SteamVR running together compete for the headset.");
+    xr_logf("  Use one or the other, not both.");
+}
+
 static void report_runtime_library(const char *manifest) {
     if (manifest == nullptr || manifest[0] == '\0')
         return;
@@ -919,9 +986,7 @@ static void report_runtime_library(const char *manifest) {
         xr_logf("  app can start under it. This is a fault in that runtime's installation,");
         xr_logf("  not in this mod, and it will affect every 32-bit OpenXR title equally.");
     } else {
-        xr_logf("  The library exists, so the manifest is not the problem. The runtime itself");
-        xr_logf("  refused to start -- usually its service is not running, or the headset is");
-        xr_logf("  not connected. Start the headset link first, then launch the game.");
+        xr_logf("  The library exists, so the manifest is not the problem.");
     }
 }
 
@@ -1270,12 +1335,40 @@ static bool create_session_and_swapchains(void) {
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XR_CHECK(p_xrGetSystem(g_instance, &sgi, &g_system), "xrGetSystem");
 
-    // Mandatory before session creation on the GL extension, even though we ignore the version
-    // bounds: skipping it makes xrCreateSession fail on conformant runtimes.
+    // Which adapter this is, said BEFORE the session is attempted.
+    //
+    // The environment block at the end of init names the GPU, the GL version and the driver --
+    // and only prints on SUCCESS. So the one failure where the adapter is the entire question,
+    // XR_ERROR_GRAPHICS_DEVICE_INVALID, was the one where we never said which adapter it was.
+    {
+        const char *gl_vendor = (const char *) glGetString(GL_VENDOR);
+        const char *gl_rend = (const char *) glGetString(GL_RENDERER);
+        const char *gl_ver = (const char *) glGetString(GL_VERSION);
+        xr_logf("graphics: %s | %s | GL %s", gl_vendor ? gl_vendor : "(unknown vendor)",
+                gl_rend ? gl_rend : "(unknown renderer)", gl_ver ? gl_ver : "(unknown)");
+    }
+
+    // Mandatory before session creation on the GL extension: skipping it makes xrCreateSession
+    // fail on conformant runtimes. The answer used to be discarded -- but if this context is
+    // outside the runtime's supported range, that IS why the session is about to be refused,
+    // and we were already holding the number that proves it.
     PFN_xrGetOpenGLGraphicsRequirementsKHR p_reqs = nullptr;
     if (resolve(g_instance, "xrGetOpenGLGraphicsRequirementsKHR", &p_reqs)) {
         XrGraphicsRequirementsOpenGLKHR reqs{XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR};
-        p_reqs(g_instance, g_system, &reqs);
+        if (XR_SUCCEEDED(p_reqs(g_instance, g_system, &reqs))) {
+            GLint gl_major = 0, gl_minor = 0;
+            glGetIntegerv(GL_MAJOR_VERSION, &gl_major);
+            glGetIntegerv(GL_MINOR_VERSION, &gl_minor);
+            const XrVersion ours = XR_MAKE_VERSION(gl_major, gl_minor, 0);
+            xr_logf("  runtime wants GL %d.%d to %d.%d; this context is GL %d.%d",
+                    (int) XR_VERSION_MAJOR(reqs.minApiVersionSupported),
+                    (int) XR_VERSION_MINOR(reqs.minApiVersionSupported),
+                    (int) XR_VERSION_MAJOR(reqs.maxApiVersionSupported),
+                    (int) XR_VERSION_MINOR(reqs.maxApiVersionSupported), (int) gl_major,
+                    (int) gl_minor);
+            if (ours < reqs.minApiVersionSupported)
+                xr_logf("  -> BELOW the minimum. That alone will make the session be refused.");
+        }
     }
 
     uint32_t view_count = 0;
@@ -1312,7 +1405,18 @@ static bool create_session_and_swapchains(void) {
     XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};
     sci.next = &gb;
     sci.systemId = g_system;
-    XR_CHECK(p_xrCreateSession(g_instance, &sci, &g_session), "xrCreateSession");
+    {
+        // Kept rather than discarded, so the guidance below can be keyed to the actual result.
+        // XR_CHECK logs the code and drops it, which left one paragraph guessing at every
+        // possible cause -- and it told a user whose GPU had been rejected that his headset
+        // service was not running.
+        const XrResult session_result = p_xrCreateSession(g_instance, &sci, &g_session);
+        if (XR_FAILED(session_result)) {
+            g_last_init_result = session_result;
+            xr_logf("xrCreateSession failed: %s", xr_str(session_result));
+            return false;
+        }
+    }
 
     XrReferenceSpaceCreateInfo rsci{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     // LOCAL: seated, origin where the headset was when the runtime settled. We only consume
@@ -1597,6 +1701,7 @@ static void try_init(void) {
             // Answer the obvious next question here rather than making somebody open a JSON
             // file and check for a DLL by hand.
             report_runtime_library(g_runtime_manifest);
+            advise_for_result(g_last_init_result);
             xr_logf("  Routes confirmed working: Virtual Desktop, or SteamVR 2.17+");
             xr_logf("    (SteamVR: Settings > OpenXR > Set SteamVR as OpenXR Runtime).");
         }
