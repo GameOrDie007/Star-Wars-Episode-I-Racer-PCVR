@@ -199,21 +199,19 @@ Worth tuning:
   angular size rather than shrinking to sub-pixel, the way the original sprites did. The moon
   is about 0.5 deg across, for reference.
 
-- **Render resolution** - the fraction of your runtime's recommended per-eye resolution the game
-  actually renders. It is **not** 1.00 by default, and should not be: runtimes recommend
-  generously, and this is a 1999 engine running its whole world on one CPU thread. On the machine
-  it was tuned on, 1.00 asks for 10 megapixels an eye and lands around 60 fps, while the default
-  0.60 holds a locked 90. The panel shows the resolution each setting produces - raise it until
-  frames start dropping, then come back one notch.
+- **Windows display scaling no longer decides your VR resolution.** If your desktop runs at
+  125%, 150% or any other scaling - normal on 4K monitors and most laptops - earlier versions
+  rendered at your monitor's full physical resolution and handed that to the headset. On a 4K
+  screen at 150% that is 8.3 megapixels an eye instead of 3.7, for no visible gain, and it was
+  usually the difference between holding 90 fps and not.
 
-  This is independent of your monitor and of Windows display scaling. Earlier versions were not:
-  the desktop window's size silently decided the render resolution, so a 150%-scaled display cost
-  about 10 fps for nothing. If v1.3 ran worse for you than it should have, that was why.
-- **Desktop mirror** - whether to paint the window on your monitor: *Every frame*, *Every other
-  frame*, or *Off*. The headset never reads that window, so on a large monitor this is pure cost -
-  a 4K mirror can take a meaningful slice of the frame for a picture nobody is looking at while
-  the headset is on. Turn it down if you need frames, leave it on if someone is watching or you
-  are recording.
+  Measured on the development machine, same race, twenty minutes apart: v1.3 finished each
+  frame with 0.25 ms to spare and missed 7.3% of them; v1.4 has 2.89 ms to spare and misses
+  1.0%. Nothing to configure - it just stops asking the desktop.
+
+  One side effect worth knowing: on a scaled display the desktop mirror window is now scaled up
+  by Windows, so the picture on your monitor is slightly softer than before. The image in the
+  headset is unaffected.
 
 For performance, in **Render -> Graphics Settings**: enable *Cull off-screen meshes*, disable *AI full
 LOD*, and leave the frame cap unlimited.
@@ -279,9 +277,30 @@ Prefer the ini keys. The environment variables still work when they actually arr
 
 ## Troubleshooting
 
-**Game will not start VR, runs flat.** Check the top of `hook.log`. `XR_ERROR_FORM_FACTOR_UNAVAILABLE`
-means no headset was streaming when it launched - start Virtual Desktop first. No runtime at all
-means you have no 32-bit OpenXR (see *Requirements*).
+### VR will not start - the game runs flat on the monitor
+
+**Open `vr_report.txt`** in the game folder, next to `SWEP1RCR.EXE`. It is a short file
+written fresh every launch containing only the VR startup lines, and it names the cause. (The
+same lines are in `hook.log`, about 2,500 lines down, which is why the short file exists.)
+
+Every failure below has been seen by a real player. Match the error and skip to the fix.
+
+| What the report says | What it means | Fix |
+|---|---|---|
+| `NONE REGISTERED` | No 32-bit OpenXR runtime on the PC. The game is 32-bit, so a 64-bit-only runtime cannot serve it however well the headset works elsewhere | Install Virtual Desktop, or SteamVR 2.17+ and set Settings > OpenXR > *Set SteamVR as OpenXR Runtime* |
+| `XR_ERROR_RUNTIME_UNAVAILABLE` | A runtime is registered but would not start. Meta's PC runtime does this - it registers a 32-bit entry that does not work | Switch to SteamVR or Virtual Desktop. Do not spend time on Meta's runtime |
+| `XR_ERROR_FILE_ACCESS_ERROR` | Something the loader needed could not be read - usually a broken **OpenXR API layer**, not the runtime. ReShade's is the usual culprit. A bad layer fails *every* runtime identically, so swapping runtimes will not help | The report lists your layers and flags any whose file is missing. Uncheck it - [OpenXR-API-Layers-GUI](https://github.com/fredemmott/OpenXR-API-Layers-GUI) lists them, with a Win32 and a Win64 tab |
+| `XR_ERROR_GRAPHICS_DEVICE_INVALID` | The runtime rejected the **graphics card** the game is using. Almost always the game is on the integrated GPU while the headset runs off the discrete one. A low frame rate in flat mode is the same symptom | Windows Settings > System > Display > **Graphics** > Add desktop app > `SWEP1RCR.EXE` > Options > **High performance** > Save, then relaunch |
+| `XR_ERROR_FORM_FACTOR_UNAVAILABLE` | No headset was available at launch | Connect and start streaming **first**, then launch the game |
+
+**Do not run Virtual Desktop and SteamVR at the same time.** They compete for the headset and
+neither gets a clean session. Use one or the other.
+
+**Do not overwrite `assets/` with the upstream SW_RACER_RE release.** This mod forked that
+project some time ago and upstream has moved a long way since; its shaders expect things this
+renderer does not provide, and `assets/shaders/` is required at runtime. If you want the HD
+model system, take `assets/gltf/` only - and note it ships empty, because it is the
+replacement framework, not a set of models.
 
 **Need to launch without VR:** set `no_vr=1` in the `[vr]` block of `SW_RACER_RE.ini`, or
 `SWE1R_NO_VR=1` in the environment if it reaches the game (see above).
