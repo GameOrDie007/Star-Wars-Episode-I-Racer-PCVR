@@ -1901,6 +1901,12 @@ float vr_harness_quit_seconds(void) {
     return g_s.harness_quit_seconds;
 }
 
+// The world scale actually in force, never zero. Shared with the renderer so the scale
+// measurement can be logged in metres rather than raw units.
+extern "C" float vr_world_units_per_metre_or_1(void) {
+    return (g_s.world_units_per_metre > 0.01f) ? g_s.world_units_per_metre : 1.0f;
+}
+
 int vr_eye_count(void) {
     return vr_is_active() ? 2 : 1;
 }

@@ -45,6 +45,8 @@ void vr_get_target_size(unsigned int *width, unsigned int *height);
 
 // How many times the scene must be drawn this frame: 2 in VR, 1 flat.
 int vr_eye_count(void);
+// The world scale in force, clamped away from zero.
+float vr_world_units_per_metre_or_1(void);
 
 // Seconds until an unattended run closes itself; 0 = never (the default). A harness that
 // needs a person in the room to close it is not unattended.

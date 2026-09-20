@@ -340,6 +340,27 @@ static void finalise_pod_measurement() {
             g_pod_extent_units = longest;
             g_pod_distance_units = sqrtf(best_d2);
             g_pod_part_units = p.biggest_part;
+            // Put the scale measurement in the LOG, not only in a panel nobody can read
+            // through a headset without stopping to squint. This is the number that
+            // decides the default world scale, and asking a tester to transcribe it is
+            // how it stayed unanswered. Logged once, and again only if the pod changes
+            // size by more than a tenth -- a different racer, or a different track.
+            static float logged_extent = 0.0f;
+            const float d = (logged_extent > 0.0f)
+                                ? fabsf(longest - logged_extent) / logged_extent
+                                : 1.0f;
+            if (d > 0.10f && hook_log != NULL) {
+                logged_extent = longest;
+                const float s = vr_world_units_per_metre_or_1();
+                fprintf(hook_log,
+                        "[scale] largest part %.1f units = %.2f m (an engine is 7 m,"
+                        " so %.2f units/m would be correct) | whole vehicle %.1f units"
+                        " = %.2f m | current %.2f units/m\n",
+                        p.biggest_part, p.biggest_part / s,
+                        (p.biggest_part > 0.0f) ? p.biggest_part / 7.0f : 0.0f, longest,
+                        longest / s, s);
+                fflush(hook_log);
+            }
         }
     }
     g_pod_group_count = 0;
