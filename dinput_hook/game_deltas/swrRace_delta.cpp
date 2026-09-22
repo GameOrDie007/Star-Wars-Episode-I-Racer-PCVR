@@ -341,6 +341,13 @@ enum {
 
 static int g_cockpit_step = 0;
 static int g_camera_mode = -1;
+// The player's CHOICE, as opposed to whether the choice is in effect right now. Changed only by
+// the view button. g_cockpit_step is this AND the game still being on the chase camera, and the
+// two have to be separate: the game takes the camera away on its own (death, respawn, cutscene)
+// and gives it back on the chase camera, at which point the choice has to still be there to
+// restore. Collapsing them into one flag is what made cockpit view -- and ONLY cockpit view --
+// silently revert to chase after every death.
+static bool g_cockpit_wanted = false;
 
 int vr_cockpit_step_active(void) {
     return g_cockpit_step;
@@ -367,23 +374,28 @@ static bool cockpit_cycle_update(swrRace *player) {
         suppress_until_release = false;
 
     // Our stop only exists on top of the default chase camera. Any other mode means the game has
-    // moved on -- including a respawn or a cutscene taking the camera -- so stand down.
+    // moved on -- a real camera the player cycled to, or a respawn or cutscene helping itself --
+    // so stand down for now. The CHOICE is left alone: the game hands the chase camera back when
+    // it is done, and the seat has to come back with it.
     if (g_camera_mode != CAM_MODE_CHASE) {
         g_cockpit_step = 0;
         return false;
     }
 
     if (down_edge) {
-        if (g_cockpit_step) {
+        if (g_cockpit_wanted) {
             // Leaving our stop: let this press through and the game advances to the engine cam.
-            g_cockpit_step = 0;
+            g_cockpit_wanted = false;
         } else {
             // Entering it: absorb this press. The game stays on the chase camera and we take the
             // view matrix, so the player is in the seat with the pod around them.
-            g_cockpit_step = 1;
+            g_cockpit_wanted = true;
             suppress_until_release = true;
         }
     }
+    // On the chase camera the seat is exactly the player's standing choice -- including on the
+    // frame the game gives the camera back after a death, which is the whole point.
+    g_cockpit_step = g_cockpit_wanted ? 1 : 0;
     return suppress_until_release;
 }
 

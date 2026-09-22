@@ -102,7 +102,23 @@ void vr_frame_end(void);
 // so geometry you look at by turning your head has often already been discarded before our
 // renderer sees it. Widening that frustum costs some offscreen work and changes culling
 // only -- the projection actually rendered comes from the runtime. 1.0 = untouched.
+//
+// This is now a FLOOR. A fixed multiplier cannot know where the head is pointing, and the two
+// functions below let the renderer ask for a cone that demonstrably covers this eye instead of
+// hoping a constant does. 1.0 still means "leave the engine's frustum completely alone".
 float vr_get_cull_fov_boost(void);
+
+// Half-angle in degrees from an eye's forward axis to the farthest CORNER of its frustum, and
+// how far the head is currently looking away from the pod camera's own axis. Their sum is the
+// cone the engine has to cull for, for this eye, this frame.
+float vr_eye_cone_half_deg(int eye);
+float vr_head_deviation_deg(int eye);
+
+// Menu navigation: collapse a raw thumbstick reading to at most one live direction, so a stick
+// pushed to a corner cannot step two lists at once. Latches on the first direction past the
+// threshold and frees only when the stick returns near centre. Menu event path ONLY -- it is
+// never applied to the keys that steer the pod.
+void vr_menu_lock_axes(float *x, float *y);
 
 // Non-zero to force NODE_SELECTOR nodes to draw ALL their children instead of the single one
 // the engine picked. SWE1R splits the track into sections and game code selects which are

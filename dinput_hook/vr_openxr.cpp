@@ -287,6 +287,19 @@ struct VrState {
     // F5 overlay magnification in VR only; flat play keeps its native size.
     float overlay_scale = 1.65f;
     float cull_fov_boost = 2.0f;
+    // Menu navigation only: the first direction to pass the tilt threshold locks the other axis
+    // out until the stick comes back to centre. A thumbstick pushed to a corner sends up AND
+    // right at once, so one flick moves the selection two places in two different lists.
+    //
+    // A latch, not a "whichever is larger" test: a stick crossing the diagonal mid-push would
+    // flip the winner and fire the other direction, which is the same bug with extra steps. The
+    // release threshold is deliberately well below the engage one, so a Quest stick that no
+    // longer returns to a clean zero cannot chatter between locked and free.
+    //
+    // RACING IS NOT TOUCHED. This applies to the front-end menu event path only, where every
+    // input is a discrete step; the arrow-key path that steers the pod is left exactly as it is.
+    bool menu_axis_lock = true;
+    float menu_lock_tilt = 0.35f;
     bool render_all_selectors = false;
     // On by default from v1.2. It writes swrRace_SteeringInput directly, which is the
     // route the game's own analog controllers use; the previous implementation wrote a raw
@@ -482,6 +495,8 @@ static void vr_settings_load(void) {
     g_s.hud_scale = vr_ini_get_f("hud_scale", g_s.hud_scale);
     g_s.overlay_scale = vr_ini_get_f("overlay_scale", g_s.overlay_scale);
     g_s.cull_fov_boost = vr_ini_get_f("cull_fov_boost", g_s.cull_fov_boost);
+    g_s.menu_axis_lock = vr_ini_get_b("menu_axis_lock", g_s.menu_axis_lock);
+    g_s.menu_lock_tilt = vr_ini_get_f("menu_lock_tilt", g_s.menu_lock_tilt);
     g_s.menu_shift = vr_ini_get_f("menu_shift", g_s.menu_shift);
     g_s.hud_redirect = vr_ini_get_b("hud_redirect", g_s.hud_redirect);
     // NOTE the key name. Everyone who ran v1.0/v1.1 has "analog_steering=0" persisted from
@@ -551,6 +566,8 @@ void vr_settings_save(void) {
     vr_ini_set_f("hud_scale", g_s.hud_scale);
     vr_ini_set_f("overlay_scale", g_s.overlay_scale);
     vr_ini_set_f("cull_fov_boost", g_s.cull_fov_boost);
+    vr_ini_set_b("menu_axis_lock", g_s.menu_axis_lock);
+    vr_ini_set_f("menu_lock_tilt", g_s.menu_lock_tilt);
     vr_ini_set_f("menu_shift", g_s.menu_shift);
     vr_ini_set_b("world_flares", g_s.world_flares);
     vr_ini_set_f("flare_size_m", g_s.flare_size_m);
@@ -2462,6 +2479,76 @@ float vr_get_cull_fov_boost(void) {
     return g_s.cull_fov_boost;
 }
 
+// Half-angle in DEGREES from this eye's forward axis out to the farthest CORNER of its frustum.
+// The corner, not the edge: an engine cull cone that only reaches the top edge still clips the
+// top corners, and on this canvas the corners are where the ground goes missing.
+//
+// XrFovf angles are signed half-angles in radians (left and down negative), the same convention
+// vr_get_eye_projection reads, so the widest horizontal and vertical tangents combine straight
+// into the diagonal.
+float vr_eye_cone_half_deg(int eye) {
+    if (!vr_is_active() || eye < 0 || eye > 1)
+        return 0.0f;
+    const XrFovf &f = g_views[eye].fov;
+    float th = fabsf(tanf(f.angleLeft));
+    const float tr = fabsf(tanf(f.angleRight));
+    if (tr > th)
+        th = tr;
+    float tv = fabsf(tanf(f.angleUp));
+    const float td = fabsf(tanf(f.angleDown));
+    if (td > tv)
+        tv = td;
+    return atanf(sqrtf(th * th + tv * tv)) * (180.0f / 3.14159265f);
+}
+
+// Angle in DEGREES between where the head is looking and the pod camera's own forward axis --
+// how far off its own frustum the engine has to cull for this eye to be complete.
+//
+// Taken from the very matrix the renderer composes onto the game's view matrix rather than from
+// the pose again, so it cannot disagree with what is actually drawn. That matrix maps
+// camera space to eye space; element [10] of a rotation-only column-major matrix is exactly
+// the cosine between the two forward axes.
+float vr_head_deviation_deg(int eye) {
+    if (!vr_is_active() || eye < 0 || eye > 1)
+        return 0.0f;
+    float m[16];
+    vr_get_eye_view(eye, m);
+    float c = m[10];
+    if (c > 1.0f)
+        c = 1.0f;
+    else if (c < -1.0f)
+        c = -1.0f;
+    return acosf(c) * (180.0f / 3.14159265f);
+}
+
+// Menu navigation: reduce a raw stick reading to at most one live direction. See the note on
+// menu_axis_lock in the settings struct for why this is a latch and not a comparison, and why
+// it is confined to the menu event path.
+void vr_menu_lock_axes(float *x, float *y) {
+    if (x == nullptr || y == nullptr || !g_s.menu_axis_lock)
+        return;
+    float tilt = g_s.menu_lock_tilt;
+    if (tilt < 0.05f)
+        tilt = 0.05f;
+    else if (tilt > 0.95f)
+        tilt = 0.95f;
+    // Well below the engage threshold: a stick that no longer rests at a clean zero must still
+    // be able to release the latch, or one diagonal push locks an axis out for good.
+    const float release = tilt * 0.5f;
+
+    static int latched = 0;// 0 = free, 1 = horizontal, 2 = vertical
+    const float ax = fabsf(*x), ay = fabsf(*y);
+    if (ax < release && ay < release)
+        latched = 0;
+    else if (latched == 0 && (ax >= tilt || ay >= tilt))
+        latched = (ax >= ay) ? 1 : 2;
+
+    if (latched == 1)
+        *y = 0.0f;
+    else if (latched == 2)
+        *x = 0.0f;
+}
+
 int vr_render_all_selectors(void) {
     return (vr_is_active() && g_s.render_all_selectors) ? 1 : 0;
 }
@@ -2980,6 +3067,21 @@ void vr_probe_draw_imgui(void) {
     ImGui::SliderFloat("Overlay text size", &g_s.overlay_scale, 0.8f, 3.5f, "%.2fx");
     ImGui::TextDisabled("Size of THIS panel's text. Takes effect next frame.");
     ImGui::SliderFloat("Engine cull FOV boost", &g_s.cull_fov_boost, 1.0f, 3.0f, "%.2fx");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("A FLOOR. The cull cone now also tracks the head automatically, so\n"
+                          "this only matters if you want it wider still. 1.0 turns BOTH off\n"
+                          "and hands culling back to the engine -- ground will disappear when\n"
+                          "you look down.");
+    ImGui::Checkbox("Menu: one stick direction at a time", &g_s.menu_axis_lock);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Menus only, never racing. A stick near a corner counts as two\n"
+                          "directions at once and steps two lists per flick.");
+    if (g_s.menu_axis_lock) {
+        ImGui::SliderFloat("  Lock engages at tilt", &g_s.menu_lock_tilt, 0.10f, 0.90f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How far the stick must go before one direction claims it.\n"
+                              "Raise this if a drifting stick locks an axis on its own.");
+    }
     ImGui::Checkbox("Draw all selector children", &g_s.render_all_selectors);
     ImGui::Checkbox("Swap eye render order", &g_s.swap_eye_order);
     ImGui::Checkbox("Head rotation drives camera", &g_s.head_drives_camera);
@@ -3117,6 +3219,8 @@ void vr_probe_draw_imgui(void) {
     if (memcmp(&before.world_units_per_metre, &g_s.world_units_per_metre, sizeof(float)) != 0 ||
         before.panel_distance != g_s.panel_distance || before.panel_width != g_s.panel_width ||
         before.hud_scale != g_s.hud_scale || before.cull_fov_boost != g_s.cull_fov_boost ||
+        before.menu_axis_lock != g_s.menu_axis_lock ||
+        before.menu_lock_tilt != g_s.menu_lock_tilt ||
         memcmp(&before.overlay_scale, &g_s.overlay_scale, sizeof(float)) != 0 ||
         before.menu_shift != g_s.menu_shift || before.hud_redirect != g_s.hud_redirect ||
         before.analog_steering != g_s.analog_steering ||

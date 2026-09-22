@@ -796,10 +796,20 @@ void stdControl_ReadControls_boostfix_delta(void) {
         // the same fix applied to one path and not the other. Pushing the right stick in a
         // front-end menu did nothing at all, which is exactly what a user reported as
         // 'trouble moving the selection to where I wanted'.
-        const float menu_x = (fabsf(steer) > fabsf(vr_input_pitch_x())) ? steer
-                                                                       : vr_input_pitch_x();
-        vr_menu_key(VRVK_UP, pitch > deadzone || wdp_u, 0);
-        vr_menu_key(VRVK_DOWN, pitch < -deadzone || wdp_d, 1);
+        float menu_x = (fabsf(steer) > fabsf(vr_input_pitch_x())) ? steer : vr_input_pitch_x();
+        // One direction at a time, in menus only. A thumbstick held anywhere near a corner is
+        // past the threshold on BOTH axes, so a single flick moved the selection down a list
+        // AND sideways through a setting -- with no way to aim, since the diagonal band is most
+        // of the stick's travel. The lock latches onto the first axis past the tilt threshold
+        // and releases only when the stick comes back to centre.
+        //
+        // menu_x/menu_y are copies. The values the RACE reads -- steer, pitch, and the arrow
+        // keys below -- are untouched, which is the whole reason this is applied here and not
+        // where the two sticks are first read.
+        float menu_y = pitch;
+        vr_menu_lock_axes(&menu_x, &menu_y);
+        vr_menu_key(VRVK_UP, menu_y > deadzone || wdp_u, 0);
+        vr_menu_key(VRVK_DOWN, menu_y < -deadzone || wdp_d, 1);
         vr_menu_key(VRVK_LEFT, menu_x < -deadzone || wdp_l, 2);
         vr_menu_key(VRVK_RIGHT, menu_x > deadzone || wdp_r, 3);
         vr_menu_key(VRVK_RETURN, vr_input_boost() != 0 || wbtn[3] || wbtn[10], 4);

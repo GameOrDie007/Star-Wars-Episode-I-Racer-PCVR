@@ -2370,23 +2370,86 @@ static void swrViewport_Render_Eye(int x) {
         if (vr_is_active() && boost > 1.0f && rdCamera_pCurCamera != nullptr) {
             vr_saved_fov = rdCamera_pCurCamera->fov;
             float widened = vr_saved_fov * boost;
-            if (widened > 175.0f)
-                widened = 175.0f;
+
+            // A constant multiplier cannot know where the head is pointing, and -- worse -- the
+            // cone it produces is not symmetric. rdCamera_BuildClipFrustum derives the cull
+            // planes from fov_y = (width/2)/tan(fov/2) and the canvas size, which works out as
+            //
+            //     horizontal half-angle = fov/2
+            //     vertical   half-angle = atan(tan(fov/2) * height/width)
+            //
+            // On a 16:9 canvas the vertical cone is far narrower than the horizontal one. With
+            // the game's own fov and a 2x boost that is around 44 degrees -- narrower than the
+            // headset's own vertical half-FOV -- so the engine throws away GROUND that the eye
+            // can plainly see, along a dead straight line, before our renderer is ever offered
+            // it. A seated player looking down loses most of the track. That is exactly the
+            // "missing ground geometry at the bottom of the viewport" a user reported, and the
+            // straight edge that tilts with the head is the tell: a plane through the camera.
+            //
+            // So compute what this eye actually needs -- how far the head has turned off the
+            // pod camera's axis, plus the eye's own corner half-angle, plus a margin -- and
+            // solve for the fov that gives the VERTICAL cone at least that much. The boost
+            // stays as a floor so a player who has tuned it does not lose it.
+            float need = 0.0f;
+            float aspect = 1.0f;
+            {
+                const float kDeg = 3.14159265f / 180.0f;
+                const int eye = vr_get_current_eye();
+                need = vr_head_deviation_deg(eye) + vr_eye_cone_half_deg(eye) + 4.0f;
+                // fov_y must stay well clear of zero: it divides into depthRangeScale.
+                if (need > 88.0f)
+                    need = 88.0f;
+
+                const rdCanvas *cv = rdCamera_pCurCamera->canvas;
+                if (cv != nullptr) {
+                    const float cw = (float) (cv->widthMinusOne - cv->xStart);
+                    const float ch = (float) (cv->heightMinusOne - cv->yStart);
+                    if (cw > 1.0f && ch > 1.0f)
+                        aspect = cw / ch;
+                }
+                const float fov_for_h = 2.0f * need;
+                const float fov_for_v = 2.0f * atanf(tanf(need * kDeg) * aspect) / kDeg;
+                if (fov_for_h > widened)
+                    widened = fov_for_h;
+                if (fov_for_v > widened)
+                    widened = fov_for_v;
+            }
+
+            // 179 is the engine's own ceiling (rdCamera_NewEntry clamps there) and keeps
+            // tan(fov/2) finite. Never NARROWER than the game asked for: this may only ever add
+            // geometry back, never remove any.
+            if (widened > 179.0f)
+                widened = 179.0f;
+            if (widened < vr_saved_fov)
+                widened = vr_saved_fov;
             const rdClipFrustum *cf_before = rdCamera_pCurCamera->pClipFrustum;
             const float lp_before = cf_before ? cf_before->leftPlane : 0.0f;
             const float rp_before = cf_before ? cf_before->rightPlane : 0.0f;
             rdCamera_pCurCamera->fov = widened;
             const int build_ok = rdCamera_BuildFOV(rdCamera_pCurCamera);
             vr_fov_widened = true;
-            static bool logged_fov = false;
-            if (!logged_fov && hook_log) {
-                logged_fov = true;
+            // Log the first pass, then again each time the demand grows by a clear margin, up
+            // to a handful of lines. One line at startup could not show the case that matters:
+            // the ground only disappears once the head is pointed somewhere, and by then the
+            // one line has long been written. The DELIVERED vertical cone is printed beside
+            // the requested one, so a log says whether the eye is actually covered rather than
+            // whether we asked for it to be.
+            static float logged_upto = 0.0f;
+            static int log_lines = 0;
+            if (hook_log && log_lines < 8 && need > logged_upto + 4.0f) {
+                logged_upto = need;
+                log_lines++;
+                const float kDeg = 3.14159265f / 180.0f;
+                const float got_v = atanf(tanf(widened * 0.5f * kDeg) / aspect) / kDeg;
                 const rdClipFrustum *cf = rdCamera_pCurCamera->pClipFrustum;
                 fprintf(hook_log,
-                        "[VR] cull-fov: canvas=%p fov %.2f -> %.2f BuildFOV=%d  planes L/R "
+                        "[VR] cull-fov: fov %.1f -> %.1f  need %.1f deg (head %.1f + eye %.1f)"
+                        "  canvas %.2f:1  cone H %.1f V %.1f  BuildFOV=%d  planes L/R "
                         "%.4f/%.4f -> %.4f/%.4f  T/B %.4f/%.4f  zNear=%.4f\n",
-                        (void *) rdCamera_pCurCamera->canvas, vr_saved_fov, widened, build_ok,
-                        lp_before, rp_before, cf ? cf->leftPlane : 0.0f,
+                        vr_saved_fov, widened, need,
+                        vr_head_deviation_deg(vr_get_current_eye()),
+                        vr_eye_cone_half_deg(vr_get_current_eye()), aspect, widened * 0.5f,
+                        got_v, build_ok, lp_before, rp_before, cf ? cf->leftPlane : 0.0f,
                         cf ? cf->rightPlane : 0.0f, cf ? cf->topPlane : 0.0f,
                         cf ? cf->bottomPlane : 0.0f, cf ? cf->zNear : 0.0f);
                 fflush(hook_log);
