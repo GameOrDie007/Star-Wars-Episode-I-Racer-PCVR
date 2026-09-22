@@ -120,6 +120,19 @@ float vr_head_deviation_deg(int eye);
 // never applied to the keys that steer the pod.
 void vr_menu_lock_axes(float *x, float *y);
 
+// Cockpit bump smoothing. Fraction of the fast movement along the pod's OWN up axis to remove
+// from the seat position, and the filter's time constant. 0 strength = the rigid camera that
+// shipped in v1.4. Nothing else is smoothed: see the note in the settings block for why lag on
+// any other axis, or on rotation, is worse in a headset than the jolt it would cure.
+float vr_cockpit_smooth(void);
+float vr_cockpit_smooth_seconds(void);
+
+// Frame serial and the runtime's predicted display time in seconds. The camera site runs once
+// per EYE, so anything that keeps state between frames must step only when the serial moves and
+// give both eyes the same answer -- two eyes filtered independently is stereo divergence.
+unsigned long vr_frame_serial(void);
+double vr_frame_time_s(void);
+
 // Non-zero to force NODE_SELECTOR nodes to draw ALL their children instead of the single one
 // the engine picked. SWE1R splits the track into sections and game code selects which are
 // visible from the POD's viewpoint each frame (-2 = draw nothing); turning your head shows

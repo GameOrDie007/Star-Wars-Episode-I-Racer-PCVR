@@ -258,6 +258,17 @@ struct VrState {
     // How much of the pod's roll the camera inherits. 1 = welded to the pod, 0 = horizon held
     // level. Pitch and yaw are unaffected at every setting. Comfort, not correctness.
     float cockpit_roll = 0.35f;
+    // Cockpit view bolts the camera rigidly to the pod, so every bump the pod takes is a bump
+    // your head takes -- including the sharp vertical jolt at a seam in the track's collision
+    // geometry, which repeats at the same spot every lap. The chase cameras do not do this
+    // because the game's own camera follows with a lag of its own.
+    //
+    // Strength is the fraction of the fast vertical movement removed. Deliberately not 1.0 by
+    // default and deliberately not applied to any other axis: a camera that lags the pod
+    // forwards or sideways reads as the pod sliding out from under you, which is far worse in
+    // a headset than the jolt it was meant to cure. Rotation is left alone for the same reason.
+    float cockpit_smooth = 0.5f;
+    float cockpit_smooth_ms = 80.0f;
     // Per-pod seat offsets. Index is the pilot id (0..22). NaN in [0] means 'not tuned',
     // which falls back to the three globals above -- a pod with no entry behaves exactly as
     // before, so adding this cannot regress anything already set.
@@ -469,6 +480,8 @@ static void vr_settings_load(void) {
     g_s.cockpit_back = vr_ini_get_f("cockpit_back", g_s.cockpit_back);
     g_s.cockpit_right = vr_ini_get_f("cockpit_right", g_s.cockpit_right);
     g_s.cockpit_roll = vr_ini_get_f("cockpit_roll", g_s.cockpit_roll);
+    g_s.cockpit_smooth = vr_ini_get_f("cockpit_smooth", g_s.cockpit_smooth);
+    g_s.cockpit_smooth_ms = vr_ini_get_f("cockpit_smooth_ms", g_s.cockpit_smooth_ms);
     g_s.runtime_autodetect =
         (int) vr_ini_get_f("runtime_autodetect", (float) g_s.runtime_autodetect);
     g_s.harness_quit_seconds = vr_ini_get_f("harness_quit_seconds", g_s.harness_quit_seconds);
@@ -552,6 +565,8 @@ void vr_settings_save(void) {
     vr_ini_set_f("cockpit_back", g_s.cockpit_back);
     vr_ini_set_f("cockpit_right", g_s.cockpit_right);
     vr_ini_set_f("cockpit_roll", g_s.cockpit_roll);
+    vr_ini_set_f("cockpit_smooth", g_s.cockpit_smooth);
+    vr_ini_set_f("cockpit_smooth_ms", g_s.cockpit_smooth_ms);
     for (int i = 0; i < 23; i++) {
         if (g_s.cockpit_seat[i][0] == VR_SEAT_UNTUNED)
             continue;// untuned pods write nothing, so the ini stays readable
@@ -2025,6 +2040,26 @@ float vr_harness_quit_seconds(void) {
 
 // The world scale actually in force, never zero. Shared with the renderer so the scale
 // measurement can be logged in metres rather than raw units.
+// The frame serial and the runtime's predicted display time, for anything in the PER-EYE render
+// path that has to advance state exactly once a frame.
+//
+// This matters more than it looks. The camera site runs once per eye; a filter that steps on
+// every call runs at double rate, and -- far worse -- hands the two eyes two different camera
+// positions, which is stereo divergence and stops the image fusing. Both eyes must be given the
+// answer computed from the same step. Gating on the eye index cannot do it either, because the
+// eye render order is itself a setting. So callers compare the serial and step only when it
+// moves.
+unsigned long vr_frame_serial(void) {
+    return g_s.frames;
+}
+
+// Seconds, from the runtime's own predicted display time. This is the clock the compositor will
+// actually show the frame at, which is the right one for a filter whose whole job is a time
+// constant. 0 when there is no frame state to read.
+double vr_frame_time_s(void) {
+    return (double) g_frame_state.predictedDisplayTime * 1e-9;
+}
+
 extern "C" float vr_world_units_per_metre_or_1(void) {
     return (g_s.world_units_per_metre > 0.01f) ? g_s.world_units_per_metre : 1.0f;
 }
@@ -2113,6 +2148,22 @@ void vr_cockpit_seat_offset(float *up, float *back, float *right) {
 }
 float vr_cockpit_roll(void) {
     return g_s.cockpit_roll < 0.0f ? 0.0f : (g_s.cockpit_roll > 1.0f ? 1.0f : g_s.cockpit_roll);
+}
+
+float vr_cockpit_smooth(void) {
+    return g_s.cockpit_smooth < 0.0f ? 0.0f
+                                     : (g_s.cockpit_smooth > 1.0f ? 1.0f : g_s.cockpit_smooth);
+}
+
+float vr_cockpit_smooth_seconds(void) {
+    // A time constant below a frame does nothing and one above a quarter second is long enough
+    // to read as the pod sinking away from you, which is the failure mode this must not have.
+    float ms = g_s.cockpit_smooth_ms;
+    if (ms < 10.0f)
+        ms = 10.0f;
+    else if (ms > 250.0f)
+        ms = 250.0f;
+    return ms * 0.001f;
 }
 
 
@@ -3151,6 +3202,20 @@ void vr_probe_draw_imgui(void) {
             ImGui::SetTooltip("1 welds the camera to the pod. 0 keeps the horizon level.\n"
                               "Pitch and yaw follow the pod either way. Lower this if the\n"
                               "rolling is uncomfortable.");
+        ImGui::SliderFloat("Bump smoothing", &g_s.cockpit_smooth, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Takes the fast vertical jolt out of the seat when the pod\n"
+                              "crosses a seam in the track. 0 is the rigid camera from v1.4.\n"
+                              "Up and down ONLY -- forward, sideways and rotation are never\n"
+                              "smoothed, because lag on those is worse in a headset than the\n"
+                              "bump itself.");
+        if (g_s.cockpit_smooth > 0.0f) {
+            ImGui::SliderFloat("  Smoothing time", &g_s.cockpit_smooth_ms, 10.0f, 250.0f,
+                               "%.0f ms");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Higher removes slower movement too. Too high and the pod\n"
+                                  "starts to feel like it is sinking away from you.");
+        }
         // Tuning twenty-three pods by eye is a long session to lose to a save that did not
         // fire. The automatic save above should cover it now; this is here so it can be
         // KNOWN rather than assumed, and it reports where it wrote.
@@ -3236,6 +3301,8 @@ void vr_probe_draw_imgui(void) {
         memcmp(&before.cockpit_back, &g_s.cockpit_back, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_right, &g_s.cockpit_right, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_roll, &g_s.cockpit_roll, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_smooth, &g_s.cockpit_smooth, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_smooth_ms, &g_s.cockpit_smooth_ms, sizeof(float)) != 0 ||
         // The per-pod seat table, compared as one block. It was absent from this list when
         // it was added to the struct, so eleven pods of hand tuning were discarded in
         // silence -- while cockpit_roll, a slider three pixels below them, saved fine.

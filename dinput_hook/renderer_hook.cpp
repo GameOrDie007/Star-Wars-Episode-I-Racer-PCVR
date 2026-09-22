@@ -2731,10 +2731,82 @@ static void swrViewport_Render_Eye(int x) {
             // The seat, in the pod's own frame, from the cockpit part's pivot.
             float up_off = 0.0f, back_off = 0.0f, right_off = 0.0f;
             vr_cockpit_seat_offset(&up_off, &back_off, &right_off);
-            const float eye[3] = {
+            float eye[3] = {
                 C.vD.x + pod_up[0] * up_off - fwd[0] * back_off + side[0] * right_off,
                 C.vD.y + pod_up[1] * up_off - fwd[1] * back_off + side[1] * right_off,
                 C.vD.z + pod_up[2] * up_off - fwd[2] * back_off + side[2] * right_off};
+
+            // Bump smoothing. The seat is bolted rigidly to the pod, so a seam in the track's
+            // collision geometry is a sharp vertical jolt straight into the player's head, at
+            // the same spot on every lap. Take the fast movement out of it -- but ONLY along
+            // the pod's own up axis, which is the direction a hover racer's suspension works
+            // in. Lag on forward or lateral would read as the pod sliding out from under you,
+            // and smoothed rotation is worse still; both are more sickening in a headset than
+            // the jolt they would cure, so neither is touched.
+            //
+            // The filter steps once per FRAME, and both eyes are handed the answer from that
+            // one step. Stepping in the per-eye path would run it at double rate and, far
+            // worse, give the two eyes different camera positions -- which is exactly the
+            // stereo divergence that stops an image fusing. The eye render order is itself a
+            // setting, so this is keyed on the frame serial rather than on the eye index.
+            {
+                static unsigned long lp_serial = 0;
+                static double lp_time = 0.0;
+                static float lp[3] = {0.0f, 0.0f, 0.0f};
+                static float lp_correction[3] = {0.0f, 0.0f, 0.0f};
+                static bool lp_valid = false;
+
+                const float strength = vr_cockpit_smooth();
+                if (strength <= 0.0f) {
+                    lp_valid = false;// so re-enabling it mid-session starts clean
+                } else {
+                    const unsigned long serial = vr_frame_serial();
+                    if (serial != lp_serial) {
+                        const double now = vr_frame_time_s();
+                        double dt = now - lp_time;
+                        // A predicted display time of 0, a paused game or a track load can all
+                        // hand us a nonsense interval. Clamp to a plausible frame.
+                        if (!(dt > 0.0) || dt > 0.25)
+                            dt = 1.0 / 90.0;
+                        lp_serial = serial;
+                        lp_time = now;
+
+                        // A respawn, a restart or a new track teleports the pod. Snapping
+                        // rather than filtering across that is the difference between an
+                        // instant recovery and the camera sailing in from the last crash site.
+                        const float jx = eye[0] - lp[0], jy = eye[1] - lp[1], jz = eye[2] - lp[2];
+                        const float jump2 = jx * jx + jy * jy + jz * jz;
+                        const float snap = 40.0f * vr_world_units_per_metre_or_1();
+                        if (!lp_valid || jump2 > snap * snap) {
+                            lp[0] = eye[0]; lp[1] = eye[1]; lp[2] = eye[2];
+                            lp_valid = true;
+                        } else {
+                            const float a = 1.0f - expf(-(float) (dt / vr_cockpit_smooth_seconds()));
+                            for (int i = 0; i < 3; i++)
+                                lp[i] += (eye[i] - lp[i]) * a;
+                        }
+
+                        // Only the component along the pod's up axis is corrected; everything
+                        // else stays exactly where the pod put it.
+                        float d = (eye[0] - lp[0]) * pod_up[0] + (eye[1] - lp[1]) * pod_up[1] +
+                                  (eye[2] - lp[2]) * pod_up[2];
+                        d *= strength;
+                        // Hard ceiling, so no amount of filter wind-up can put the seat outside
+                        // the pod or under the track. Kept small on purpose: if this is ever
+                        // reached the seat is visibly in the wrong place, so the right size is
+                        // "more than any real bump" and not a centimetre more.
+                        const float lim = 0.25f * vr_world_units_per_metre_or_1();
+                        if (d > lim)
+                            d = lim;
+                        else if (d < -lim)
+                            d = -lim;
+                        for (int i = 0; i < 3; i++)
+                            lp_correction[i] = pod_up[i] * d;
+                    }
+                    for (int i = 0; i < 3; i++)
+                        eye[i] -= lp_correction[i];
+                }
+            }
 
             // Roll attenuation. Blend the pod's up toward world up, then rebuild the basis
             // around the UNCHANGED forward, so pitch and yaw are identical at every setting and
