@@ -2749,6 +2749,60 @@ static void swrViewport_Render_Eye(int x) {
             // worse, give the two eyes different camera positions -- which is exactly the
             // stereo divergence that stops an image fusing. The eye render order is itself a
             // setting, so this is keyed on the frame serial rather than on the eye index.
+            // Measure the thing before filtering it. How far the seat moves along the pod's own
+            // up axis in one frame is the whole question -- a rate limit that rejects a
+            // collision spike while passing normal suspension travel can only be chosen from
+            // real numbers, and the first attempt at this was a low-pass picked without any.
+            // Runs whether or not smoothing is on, costs a dot product, and prints ten seconds
+            // of distribution at a time.
+            {
+                static unsigned long m_serial = 0;
+                static float m_prev[3] = {0.0f, 0.0f, 0.0f};
+                static bool m_have = false;
+                static unsigned long m_bucket[8] = {0};
+                static float m_worst = 0.0f;
+                static unsigned long m_frames = 0;
+                const unsigned long serial = vr_frame_serial();
+                if (serial != m_serial) {
+                    m_serial = serial;
+                    if (m_have) {
+                        const float du = (eye[0] - m_prev[0]) * pod_up[0] +
+                                         (eye[1] - m_prev[1]) * pod_up[1] +
+                                         (eye[2] - m_prev[2]) * pod_up[2];
+                        const float a = du < 0.0f ? -du : du;
+                        // A respawn is not suspension travel.
+                        if (a < 200.0f) {
+                            static const float edge[8] = {0.02f, 0.05f, 0.10f, 0.20f,
+                                                          0.40f, 0.80f, 1.60f, 1e30f};
+                            for (int b = 0; b < 8; b++)
+                                if (a < edge[b]) {
+                                    m_bucket[b]++;
+                                    break;
+                                }
+                            if (a > m_worst)
+                                m_worst = a;
+                            m_frames++;
+                        }
+                    }
+                    m_prev[0] = eye[0]; m_prev[1] = eye[1]; m_prev[2] = eye[2];
+                    m_have = true;
+
+                    if (hook_log != nullptr && m_frames >= 900) {
+                        fprintf(hook_log,
+                                "[seat] along-pod-up movement per frame, units, %lu frames: "
+                                "<.02 %lu  <.05 %lu  <.10 %lu  <.20 %lu  <.40 %lu  <.80 %lu  "
+                                "<1.6 %lu  more %lu  | worst %.3f\n",
+                                m_frames, m_bucket[0], m_bucket[1], m_bucket[2], m_bucket[3],
+                                m_bucket[4], m_bucket[5], m_bucket[6], m_bucket[7], m_worst);
+                        fflush(hook_log);
+                        for (int b = 0; b < 8; b++)
+                            m_bucket[b] = 0;
+                        m_frames = 0;
+                        m_worst = 0.0f;
+                    }
+                }
+            }
+
             {
                 static unsigned long lp_serial = 0;
                 static double lp_time = 0.0;
@@ -2776,7 +2830,17 @@ static void swrViewport_Render_Eye(int x) {
                         // instant recovery and the camera sailing in from the last crash site.
                         const float jx = eye[0] - lp[0], jy = eye[1] - lp[1], jz = eye[2] - lp[2];
                         const float jump2 = jx * jx + jy * jy + jz * jz;
-                        const float snap = 40.0f * vr_world_units_per_metre_or_1();
+                        // In GAME UNITS, not metres. world_units_per_metre is a setting the
+                        // player can drag, its whole slider bottom end is 0.2, and it is the
+                        // one number on this project nobody has yet pinned down -- so anything
+                        // load-bearing that divides by it inherits that uncertainty. A live ini
+                        // here had it at 0.2 against a compiled default of 2.4, which would
+                        // have made this threshold 8 units: less than two frames of travel at
+                        // racing speed, so the filter would have snapped every frame and done
+                        // nothing at all, invisibly. Anchor to the pod instead: a pod is about
+                        // 17 units, and 200 is far beyond any one frame of travel while being
+                        // nowhere near a respawn.
+                        const float snap = 200.0f;
                         if (!lp_valid || jump2 > snap * snap) {
                             lp[0] = eye[0]; lp[1] = eye[1]; lp[2] = eye[2];
                             lp_valid = true;
@@ -2794,8 +2858,15 @@ static void swrViewport_Render_Eye(int x) {
                         // Hard ceiling, so no amount of filter wind-up can put the seat outside
                         // the pod or under the track. Kept small on purpose: if this is ever
                         // reached the seat is visibly in the wrong place, so the right size is
-                        // "more than any real bump" and not a centimetre more.
-                        const float lim = 0.25f * vr_world_units_per_metre_or_1();
+                        // "more than any real bump" and not a unit more. Game units, for the
+                        // reason given on the snap threshold above.
+                        //
+                        // Was 0.6. A headset test at 0.6 put the view THROUGH the pod's own
+                        // cockpit geometry with a finely tuned seat -- which is what any
+                        // position filter does in a cockpit, since its entire mechanism is to
+                        // move the head relative to the cabin. 0.25 is what the same test says
+                        // is survivable, and it is why this whole filter now defaults to off.
+                        const float lim = 0.25f;
                         if (d > lim)
                             d = lim;
                         else if (d < -lim)

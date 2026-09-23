@@ -263,11 +263,20 @@ struct VrState {
     // geometry, which repeats at the same spot every lap. The chase cameras do not do this
     // because the game's own camera follows with a lag of its own.
     //
-    // Strength is the fraction of the fast vertical movement removed. Deliberately not 1.0 by
-    // default and deliberately not applied to any other axis: a camera that lags the pod
-    // forwards or sideways reads as the pod sliding out from under you, which is far worse in
-    // a headset than the jolt it was meant to cure. Rotation is left alone for the same reason.
-    float cockpit_smooth = 0.5f;
+    // Strength is the fraction of the fast vertical movement removed. Never applied to any
+    // other axis: a camera that lags the pod forwards or sideways reads as the pod sliding out
+    // from under you, which is far worse in a headset than the jolt it was meant to cure.
+    // Rotation is left alone for the same reason.
+    //
+    // DEFAULT OFF, after a headset test. A low-pass is the wrong filter for this. Its whole
+    // mechanism is to hold the camera still while the pod moves under it, which in a cockpit
+    // means the player's head moves RELATIVE TO THE CABIN -- and with a finely tuned seat that
+    // put the view through the pod's own geometry. It shipped on for one build on my judgement
+    // and the first person to wear it found the regression immediately. The cabin has to be
+    // rigid; that stable reference frame is what makes a cockpit comfortable in the first
+    // place. What the original report described was a spike at one spot on one track, which
+    // wants rejecting, not smoothing -- see the [seat] measurement in renderer_hook.cpp.
+    float cockpit_smooth = 0.0f;
     float cockpit_smooth_ms = 80.0f;
     // Per-pod seat offsets. Index is the pilot id (0..22). NaN in [0] means 'not tuned',
     // which falls back to the three globals above -- a pod with no entry behaves exactly as
