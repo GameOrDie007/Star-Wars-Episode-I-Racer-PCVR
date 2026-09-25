@@ -166,9 +166,16 @@ block in `SW_RACER_RE.ini`, so they persist between sessions.
 
 Worth tuning:
 
-- **World units per metre** - how large the world feels. Affects stereo separation. The
-  default 2.4 is derived from the pod's own dimensions rather than picked by eye: a podracer is
-  about 7 m and measures 17 game units. Raise it to shrink the world, lower it to enlarge.
+- **World units per metre** - how large the world feels. Affects stereo separation. Raise it to
+  shrink the world, lower it to enlarge.
+
+  Earlier versions of this page claimed the default was derived from the pod's dimensions, on
+  the basis that a podracer is about 7 m. That is wrong: 7 m is one *engine*, not the whole
+  vehicle, so the reference was comparing the wrong part and the figure it produced does not
+  mean what it said. The panel now measures a citable part instead, and `hook.log` reports
+  what it found on a `[scale]` line. The default is unchanged pending enough real readings to
+  set it honestly - so treat this as a comfort dial, not a calibrated one, and set it to
+  whatever makes the pods look right to you.
 - **Panel distance / width** - where the 2D panel sits. It is world-locked, so it stays put and you
   can look around it; **Recenter panel**, or squeezing both grips, puts it back in front of you.
 
@@ -181,8 +188,22 @@ Worth tuning:
   menus oversized. Separating them needs two layers and is not done.
 - **Overlay text size** - magnifies this debug panel's own text, which is laid out for a monitor
   at arm's length and reads small on a panel a metre and a half away.
-- **Engine cull FOV boost** - widens the engine's culling frustum so scenery does not vanish when
-  you turn your head. Costs performance; lower it if you need frames.
+- **Engine cull FOV boost** - a floor, not the main control. The engine culls to a cone built
+  from the pod camera and knows nothing about your head, so scenery you look at by turning can
+  already have been thrown away. That cone now follows your head automatically, which is what
+  fixed ground disappearing below a straight line when you looked down from a seated position.
+  Raise this only if you want it wider still; 1.0 turns both off and hands culling back to the
+  engine. Costs performance, so lower it if you need frames.
+- **Bump smoothing** (cockpit view) - **off by default.** The cockpit camera is bolted rigidly
+  to the pod, so a seam in the track goes straight into your head. This filters that out
+  vertically - but because it works by holding your head still while the pod moves under it, at
+  higher values it can move your viewpoint into the pod's own cockpit geometry. Worth trying if
+  a track jolts you; 0 is the camera that shipped in v1.4.
+- **Menu: one stick direction at a time** - on by default. A thumbstick near a corner counts as
+  two directions at once, so one flick used to move a list *and* change a setting. The first
+  direction past the tilt threshold now claims the stick until it returns to centre. Menus
+  only - racing is untouched. Raise *Lock engages at tilt* if a drifting stick locks an axis on
+  its own.
 - **Controller haptics on impact** - on by default. The Touch controllers buzz when your
   pod is hit, scaled by how hard. *Haptic strength* sets the overall level and *Haptic
   impact scale* how sharply a hit translates into vibration.
@@ -209,9 +230,16 @@ Worth tuning:
   frame with 0.25 ms to spare and missed 7.3% of them; v1.4 has 2.89 ms to spare and misses
   1.0%. Nothing to configure - it just stops asking the desktop.
 
-  One side effect worth knowing: on a scaled display the desktop mirror window is now scaled up
-  by Windows, so the picture on your monitor is slightly softer than before. The image in the
-  headset is unaffected.
+  Two side effects worth knowing, one of which the v1.4 notes got wrong. On a scaled display
+  the desktop mirror window is now scaled up by Windows, so the picture on your monitor is
+  slightly softer than before. And the headset image is **not** unaffected, as v1.4 claimed:
+  the eye texture is copied from the game's framebuffer, so on a scaled display this lowers
+  headset resolution too. That is the trade - frames for pixels - and on the machines where it
+  was measured it was plainly worth it, but it is a trade and it should have been described as
+  one.
+
+  If you would rather have the pixels, set `dpi_unaware=0` in the `[vr]` block of
+  `SW_RACER_RE.ini` and you get the v1.3 behaviour back.
 
 For performance, in **Render -> Graphics Settings**: enable *Cull off-screen meshes*, disable *AI full
 LOD*, and leave the frame cap unlimited.
