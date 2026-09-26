@@ -194,6 +194,10 @@ int vr_input_view(void);      // left stick click: switch camera
 // game's own simulation from our scene traversal. Called once per eye pass.
 void vr_perf_note_eye_render(double ms);
 
+// Meshes and vertices the pass actually drew, logged beside its time. Without these a slow
+// session cannot say whether it drew more or the machine was slower at the same work.
+void vr_perf_note_eye_geometry(int meshes, int verts);
+
 // Breadcrumb a point in the frame. Costs a timestamp and an array store. When a frame runs
 // long the whole timeline is dumped, so the gap that consumed the time names itself. Safe to
 // call from C.

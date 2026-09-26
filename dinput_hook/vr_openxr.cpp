@@ -240,6 +240,7 @@ struct VrState {
     // confirms two passes per frame rather than assuming it.
     double t_eye_ms = 0.0;
     unsigned long eye_passes = 0;
+    double eye_meshes = 0.0, eye_verts = 0.0;
     char status[256] = "not initialised";
     char runtime_name[128] = "";
 
@@ -2014,7 +2015,7 @@ void vr_begin_frame(void) {
                         "max %.2f  dropped %d/300 (%.1f%%)  waiting %.2f ms/frame (%.0f%%)  "
                         "@%dx%d  submitted %lu/300 (empty %lu, refused %lu, last 0x%x)  %.0fHz  "
                         "| wait %.2f  submit %.2f  endframe %.2f  REST %.2f ms  "
-                        "(eyes %.2f x%.1f, sim %.2f)",
+                        "(eyes %.2f x%.1f, sim %.2f)  %.0f meshes %.0fk verts/pass",
                         mean, mean > 0.0 ? 1000.0 / mean : 0.0, s[149], s[284], s[296], s[299],
                         over, 100.0 * (double) over / 300.0, wsum / 300.0,
                         sum > 0.0 ? 100.0 * wsum / sum : 0.0, vp_now[2], vp_now[3], d_end,
@@ -2022,11 +2023,17 @@ void vr_begin_frame(void) {
                         (double) g_s.display_refresh_hz, wsum / 300.0, ms_submit, ms_endframe,
                         mean - (wsum / 300.0) - ms_submit - ms_endframe, ms_eyes,
                         eyes_per_frame,
-                        mean - (wsum / 300.0) - ms_submit - ms_endframe - ms_eyes);
+                        mean - (wsum / 300.0) - ms_submit - ms_endframe - ms_eyes,
+                        g_s.eye_passes > 0 ? g_s.eye_meshes / (double) g_s.eye_passes : 0.0,
+                        g_s.eye_passes > 0
+                            ? g_s.eye_verts / (double) g_s.eye_passes / 1000.0
+                            : 0.0);
                 g_s.t_submit = 0;
                 g_s.t_endframe = 0;
                 g_s.t_eye_ms = 0.0;
                 g_s.eye_passes = 0;
+                g_s.eye_meshes = 0.0;
+                g_s.eye_verts = 0.0;
                 perf_n = 0;
             }
         }
@@ -2232,6 +2239,11 @@ static void vr_perf_marks_frame_end(double frame_ms) {
 void vr_perf_note_eye_render(double ms) {
     g_s.t_eye_ms += ms;
     g_s.eye_passes++;
+}
+
+void vr_perf_note_eye_geometry(int meshes, int verts) {
+    g_s.eye_meshes += (double) meshes;
+    g_s.eye_verts += (double) verts;
 }
 
 void vr_get_eye_view(int eye, float *out16) {

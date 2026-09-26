@@ -164,6 +164,13 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     // deep in startup is written to its own timestamped file under crashes/.
     crash_logger_install();
 
+    // Keep the previous run's log. "wb" alone discards it, and a slow or broken session is
+    // almost always diagnosed AFTER the next launch has already overwritten the only evidence
+    // of it -- which happened three times in one session here, twice to the very log being
+    // read. One generation back is enough: the comparison that matters is nearly always
+    // this run against the one before it.
+    remove("hook.log.previous");
+    rename("hook.log", "hook.log.previous");
     hook_log = fopen("hook.log", "wb");
 
     crash_logger_stage("DllMain");

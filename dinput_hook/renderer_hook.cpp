@@ -2337,6 +2337,13 @@ struct EyeRenderTimer {
         if (f.QuadPart != 0)
             vr_perf_note_eye_render(1000.0 * (double) (t1.QuadPart - t0.QuadPart) /
                                     (double) f.QuadPart);
+        // The counts alongside the time, so a slow session says WHICH kind of slow it was.
+        // A race that ran at half speed could not be explained afterwards, because "the eye
+        // pass took 10.6 ms instead of 2.1" does not distinguish "it drew five times as much"
+        // from "the machine was five times slower at drawing the same thing" -- and those have
+        // nothing in common as problems. These are read at the end of the pass, where they are
+        // final.
+        vr_perf_note_eye_geometry(g_vr_pass_mesh_count, g_vr_pass_vertex_count);
     }
 };
 
