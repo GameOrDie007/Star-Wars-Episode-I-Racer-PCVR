@@ -732,6 +732,13 @@ static bool g_cabin_offset_active = false;
 static float g_cabin_offset[3] = {0.0f, 0.0f, 0.0f};
 static const swrModel_Node *g_cabin_pod_root = nullptr;
 
+// What the stabilizers actually APPLIED, reported beside what they measured. The seat filter
+// was tested at 0, 0.7 and 1.0 and felt identical at all three -- and nothing in the log could
+// say whether that was "it ran and made no difference" or "it never ran". Those need opposite
+// next steps. Frames counts how often the stabilizer stepped; max is its biggest correction.
+static float g_pitch_applied_max_deg = 0.0f;
+static unsigned long g_pitch_applied_frames = 0;
+
 int g_vr_pass_mesh_count = 0;
 int g_vr_pass_vertex_count = 0;
 int g_vr_last_pass_meshes[2] = {0, 0};
@@ -2878,9 +2885,13 @@ static void swrViewport_Render_Eye(int x) {
                         fprintf(hook_log,
                                 "[nose] degrees per frame, %lu frames: <.05 %lu  <.10 %lu  "
                                 "<.25 %lu  <.50 %lu  <1.0 %lu  <2.0 %lu  <4.0 %lu  more %lu"
-                                "  | worst %.2f | reversals %lu\n",
+                                "  | worst %.2f | reversals %lu | stabilizer stepped %lu, "
+                                "max correction %.2f deg\n",
                                 m_frames, m_rot[0], m_rot[1], m_rot[2], m_rot[3], m_rot[4],
-                                m_rot[5], m_rot[6], m_rot[7], m_worst_rot, m_flips_rot);
+                                m_rot[5], m_rot[6], m_rot[7], m_worst_rot, m_flips_rot,
+                                g_pitch_applied_frames, g_pitch_applied_max_deg);
+                        g_pitch_applied_frames = 0;
+                        g_pitch_applied_max_deg = 0.0f;
                         fflush(hook_log);
                         for (int b = 0; b < 8; b++) {
                             m_bucket[b] = 0;
@@ -3013,6 +3024,105 @@ static void swrViewport_Render_Eye(int x) {
                 r[i] /= rl;
             float u[3] = {r[1] * fwd[2] - r[2] * fwd[1], r[2] * fwd[0] - r[0] * fwd[2],
                           r[0] * fwd[1] - r[1] * fwd[0]};
+
+            // Nose-bob stabilization: remove the FAST part of the pod's pitch from the view.
+            //
+            // Measured before built. Through the rough corner the [seat] line showed the body
+            // rising and falling ~1.5 times a second -- the same as everywhere else -- while the
+            // [nose] line showed its pitch reversing 5-7 times a second. A translation filter
+            // made no perceptible difference at any strength, which is exactly what that
+            // predicts. This targets the axis the data points at.
+            //
+            // Pitch only, in the pod's OWN frame. Yaw is steering and is never touched, and
+            // measuring about the pod's side axis (rather than as elevation against world up)
+            // keeps it correct on a banked track, where a nose bob is not a change in elevation.
+            //
+            // A recursive high-pass on the pitch RATE: hp = a * (hp + dtheta). It needs no
+            // absolute angle, so it cannot drift, and a steady pitch -- a long ramp -- decays out
+            // of it and is followed exactly. What is left is the fast oscillation, which the view
+            // is rotated against, about the camera's own right axis.
+            //
+            // No rigid-cabin counterpart is applied, unlike the seat filter. Rotating about the
+            // eye moves cockpit geometry 0.3 units away by ~0.016 units for a 3 degree correction,
+            // far too little to clip -- and a level gaze with the cabin pitching around it is what
+            // a real head does in a shaking vehicle.
+            //
+            // One step per FRAME, one answer for both eyes, as with the seat filter.
+            {
+                static unsigned long ps_serial = 0;
+                static double ps_time = 0.0;
+                static float ps_prev_fwd[3] = {0.0f, 0.0f, 0.0f};
+                static bool ps_valid = false;
+                static float ps_hp = 0.0f;       // high-passed pitch, radians
+                static float ps_phi = 0.0f;      // correction applied this frame, radians
+
+                const float strength = vr_cockpit_pitch_smooth();
+                if (strength <= 0.0f) {
+                    ps_valid = false;
+                    ps_hp = 0.0f;
+                    ps_phi = 0.0f;
+                } else {
+                    const unsigned long serial = vr_frame_serial();
+                    if (serial != ps_serial) {
+                        const double now = vr_frame_time_s();
+                        double dt = now - ps_time;
+                        if (!(dt > 0.0) || dt > 0.25)
+                            dt = 1.0 / 90.0;
+                        ps_serial = serial;
+                        ps_time = now;
+
+                        float dtheta = 0.0f;
+                        if (ps_valid) {
+                            // Signed pitch step about the pod's side axis. For a nose rising,
+                            // cross(prev, fwd) points along side (fwd x up = side), so > 0.
+                            const float cx = ps_prev_fwd[1] * fwd[2] - ps_prev_fwd[2] * fwd[1];
+                            const float cy = ps_prev_fwd[2] * fwd[0] - ps_prev_fwd[0] * fwd[2];
+                            const float cz = ps_prev_fwd[0] * fwd[1] - ps_prev_fwd[1] * fwd[0];
+                            const float sn = cx * side[0] + cy * side[1] + cz * side[2];
+                            const float cs = ps_prev_fwd[0] * fwd[0] + ps_prev_fwd[1] * fwd[1] +
+                                             ps_prev_fwd[2] * fwd[2];
+                            dtheta = atan2f(sn, cs);
+                        }
+                        // A respawn or a camera cut is not a bob: start clean rather than
+                        // swinging the view to chase a 90 degree step.
+                        if (!ps_valid || fabsf(dtheta) > 0.35f) {
+                            ps_hp = 0.0f;
+                            dtheta = 0.0f;
+                            ps_valid = true;
+                        }
+                        const float tau = vr_cockpit_pitch_seconds();
+                        const float a = tau / (tau + (float) dt);
+                        ps_hp = a * (ps_hp + dtheta);
+
+                        // Rotate AGAINST the fast pitch. Ceiling of 5 degrees: the measured bob
+                        // peaked around 3, and a correction that ever needed more would be
+                        // fighting a real manoeuvre, not a vibration.
+                        float phi = -ps_hp * strength;
+                        const float lim = 5.0f * (3.14159265f / 180.0f);
+                        if (phi > lim)
+                            phi = lim;
+                        else if (phi < -lim)
+                            phi = -lim;
+                        ps_phi = phi;
+                        const float deg = fabsf(phi) * (180.0f / 3.14159265f);
+                        if (deg > g_pitch_applied_max_deg)
+                            g_pitch_applied_max_deg = deg;
+                        g_pitch_applied_frames++;
+
+                        // The RAW forward, so the next step measures the pod, not our output.
+                        ps_prev_fwd[0] = fwd[0]; ps_prev_fwd[1] = fwd[1]; ps_prev_fwd[2] = fwd[2];
+                    }
+
+                    // Rotate the view basis about r by ps_phi. fwd and u are both perpendicular to
+                    // r, so Rodrigues reduces to: fwd' = fwd c + u s,  u' = u c - fwd s.
+                    const float c = cosf(ps_phi), s = sinf(ps_phi);
+                    for (int i = 0; i < 3; i++) {
+                        const float f0 = fwd[i], u0 = u[i];
+                        fwd[i] = f0 * c + u0 * s;
+                        u[i] = u0 * c - f0 * s;
+                    }
+                }
+            }
 
             // Look back (X) while in cockpit view.
             //

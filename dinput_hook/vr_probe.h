@@ -130,6 +130,11 @@ void vr_menu_lock_axes(float *x, float *y);
 float vr_cockpit_smooth(void);
 float vr_cockpit_smooth_seconds(void);
 
+// Pitch stabilization: fraction of the FAST nose pitch removed from the cockpit view, and the
+// high-pass time constant that decides what counts as fast. Yaw is never touched.
+float vr_cockpit_pitch_smooth(void);
+float vr_cockpit_pitch_seconds(void);
+
 // Frame serial and the runtime's predicted display time in seconds. The camera site runs once
 // per EYE, so anything that keeps state between frames must step only when the serial moves and
 // give both eyes the same answer -- two eyes filtered independently is stereo divergence.

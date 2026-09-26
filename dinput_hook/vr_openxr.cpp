@@ -279,6 +279,17 @@ struct VrState {
     // wants rejecting, not smoothing -- see the [seat] measurement in renderer_hook.cpp.
     float cockpit_smooth = 0.0f;
     float cockpit_smooth_ms = 80.0f;
+    // Pitch stabilization. Measured, not guessed: through the rough corner the pod's BODY
+    // rises and falls ~1.5 times a second, as everywhere else, while its NOSE reverses
+    // direction 5-7 times a second. The translation filter above targeted the body and made
+    // no perceptible difference at any strength, which is what that data predicts.
+    // This removes the fast part of the nose's pitch only -- yaw is steering and is never
+    // touched -- by rotating the view about the camera's own right axis. No rigid-cabin
+    // counterpart is needed: rotating about the eye moves nearby cockpit geometry by
+    // hundredths of a unit, and letting the cabin pitch around a level gaze is what a
+    // real head does in a shaking vehicle. OFF by default until a headset says otherwise.
+    float cockpit_pitch_smooth = 0.0f;
+    float cockpit_pitch_ms = 120.0f;
     // Per-pod seat offsets. Index is the pilot id (0..22). NaN in [0] means 'not tuned',
     // which falls back to the three globals above -- a pod with no entry behaves exactly as
     // before, so adding this cannot regress anything already set.
@@ -497,6 +508,8 @@ static void vr_settings_load(void) {
     g_s.cockpit_roll = vr_ini_get_f("cockpit_roll", g_s.cockpit_roll);
     g_s.cockpit_smooth = vr_ini_get_f("cockpit_smooth", g_s.cockpit_smooth);
     g_s.cockpit_smooth_ms = vr_ini_get_f("cockpit_smooth_ms", g_s.cockpit_smooth_ms);
+    g_s.cockpit_pitch_smooth = vr_ini_get_f("cockpit_pitch_smooth", g_s.cockpit_pitch_smooth);
+    g_s.cockpit_pitch_ms = vr_ini_get_f("cockpit_pitch_ms", g_s.cockpit_pitch_ms);
     g_s.runtime_autodetect =
         (int) vr_ini_get_f("runtime_autodetect", (float) g_s.runtime_autodetect);
     g_s.harness_quit_seconds = vr_ini_get_f("harness_quit_seconds", g_s.harness_quit_seconds);
@@ -583,6 +596,8 @@ void vr_settings_save(void) {
     vr_ini_set_f("cockpit_roll", g_s.cockpit_roll);
     vr_ini_set_f("cockpit_smooth", g_s.cockpit_smooth);
     vr_ini_set_f("cockpit_smooth_ms", g_s.cockpit_smooth_ms);
+    vr_ini_set_f("cockpit_pitch_smooth", g_s.cockpit_pitch_smooth);
+    vr_ini_set_f("cockpit_pitch_ms", g_s.cockpit_pitch_ms);
     for (int i = 0; i < 23; i++) {
         if (g_s.cockpit_seat[i][0] == VR_SEAT_UNTUNED)
             continue;// untuned pods write nothing, so the ini stays readable
@@ -2178,6 +2193,20 @@ float vr_cockpit_smooth(void) {
                                      : (g_s.cockpit_smooth > 1.0f ? 1.0f : g_s.cockpit_smooth);
 }
 
+float vr_cockpit_pitch_smooth(void) {
+    const float s = g_s.cockpit_pitch_smooth;
+    return s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+}
+
+float vr_cockpit_pitch_seconds(void) {
+    float ms = g_s.cockpit_pitch_ms;
+    if (ms < 20.0f)
+        ms = 20.0f;
+    else if (ms > 400.0f)
+        ms = 400.0f;
+    return ms * 0.001f;
+}
+
 float vr_cockpit_smooth_seconds(void) {
     // A time constant below a frame does nothing and one above a quarter second is long enough
     // to read as the pod sinking away from you, which is the failure mode this must not have.
@@ -3246,6 +3275,17 @@ void vr_probe_draw_imgui(void) {
                               "Up and down ONLY -- forward, sideways and rotation are never\n"
                               "smoothed, because lag on those is worse in a headset than the\n"
                               "bump itself.");
+        ImGui::SliderFloat("Nose-bob smoothing", &g_s.cockpit_pitch_smooth, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Steadies your view when the pod's nose bobs rapidly up and\n"
+                              "down - the rough-corner feeling. Pitch only: steering and\n"
+                              "slow hills still follow the pod exactly. 0 is v1.4.");
+        if (g_s.cockpit_pitch_smooth > 0.0f) {
+            ImGui::SliderFloat("  Nose-bob time", &g_s.cockpit_pitch_ms, 20.0f, 400.0f, "%.0f ms");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Higher also steadies slower bobbing. Too high and cresting a\n"
+                                  "hill feels late.");
+        }
         if (g_s.cockpit_smooth > 0.0f) {
             ImGui::SliderFloat("  Smoothing time", &g_s.cockpit_smooth_ms, 10.0f, 250.0f,
                                "%.0f ms");
@@ -3341,6 +3381,8 @@ void vr_probe_draw_imgui(void) {
         memcmp(&before.cockpit_roll, &g_s.cockpit_roll, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_smooth, &g_s.cockpit_smooth, sizeof(float)) != 0 ||
         memcmp(&before.cockpit_smooth_ms, &g_s.cockpit_smooth_ms, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_pitch_smooth, &g_s.cockpit_pitch_smooth, sizeof(float)) != 0 ||
+        memcmp(&before.cockpit_pitch_ms, &g_s.cockpit_pitch_ms, sizeof(float)) != 0 ||
         // The per-pod seat table, compared as one block. It was absent from this list when
         // it was added to the struct, so eleven pods of hand tuning were discarded in
         // silence -- while cockpit_roll, a slider three pixels below them, saved fine.
