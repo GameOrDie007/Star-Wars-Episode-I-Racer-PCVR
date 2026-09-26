@@ -724,6 +724,14 @@ static void dump_fbo_ppm(const char *name, GLuint fbo, int w, int h) {
 // Per-pass draw counters, surfaced in the VR panel. Watching these while the ground vanishes
 // separates 'skipped during traversal' (count drops) from 'drawn but not visible' (count
 // steady) -- which is the fork every guess so far has failed to resolve.
+// Rigid cabin: the world-space shift bump smoothing applied to the cockpit camera this frame,
+// applied identically to the player's own pod so the two never move relative to each other.
+// Written by the cockpit camera block, read when the pod root is drawn, cleared at the start
+// of every pass so no other view -- chase, menus, another viewport -- ever inherits it.
+static bool g_cabin_offset_active = false;
+static float g_cabin_offset[3] = {0.0f, 0.0f, 0.0f};
+static const swrModel_Node *g_cabin_pod_root = nullptr;
+
 int g_vr_pass_mesh_count = 0;
 int g_vr_pass_vertex_count = 0;
 int g_vr_last_pass_meshes[2] = {0, 0};
@@ -1774,6 +1782,23 @@ void debug_render_node(const swrViewport &current_vp, const swrModel_Node *node,
         node->type == NODE_TRANSFORMED_COMPUTED)
         apply_node_transform(model_mat, node, (rdVector3 *) &current_vp.model_matrix.vD);
 
+    // Rigid cabin. When bump smoothing moves the cockpit camera, move the player's own pod by
+    // exactly the same amount, so the cabin never moves relative to the head and only the WORLD
+    // absorbs the chop. Moving the camera alone -- the first attempt -- held the head still while
+    // the pod bounced around it, and put the view through the pod's own geometry.
+    //
+    // Applied once, at the pod's root node, so every part below it inherits the shift: engines,
+    // cables, cockpit, pilot. This relies on apply_node_transform composing child-first
+    // (model = child * parent); a world translation added to the root's vD then carries through
+    // to every descendant unchanged. Checked, not assumed.
+    //
+    // Zero whenever smoothing is off or the view is not cockpit, so the default path is untouched.
+    if (g_cabin_offset_active && node == g_cabin_pod_root) {
+        model_mat.vD.x += g_cabin_offset[0];
+        model_mat.vD.y += g_cabin_offset[1];
+        model_mat.vD.z += g_cabin_offset[2];
+    }
+
     if (node->flags_5 & 0x4) {
         light_index = node->light_index + 1;
         num_enabled_lights = numEnabledLights[node->light_index];
@@ -2369,6 +2394,7 @@ static void swrViewport_Render_Eye(int x) {
     // the runtime, so this affects culling only. Restored at the end of the function.
     g_vr_pass_mesh_count = 0;
     g_vr_pass_vertex_count = 0;
+    g_cabin_offset_active = false;// set again below only if this pass IS the cockpit camera
 
     float vr_saved_fov = 0.0f;
     bool vr_fov_widened = false;
@@ -2927,12 +2953,16 @@ static void swrViewport_Render_Eye(int x) {
                         // "more than any real bump" and not a unit more. Game units, for the
                         // reason given on the snap threshold above.
                         //
-                        // Was 0.6. A headset test at 0.6 put the view THROUGH the pod's own
-                        // cockpit geometry with a finely tuned seat -- which is what any
-                        // position filter does in a cockpit, since its entire mechanism is to
-                        // move the head relative to the cabin. 0.25 is what the same test says
-                        // is survivable, and it is why this whole filter now defaults to off.
-                        const float lim = 0.25f;
+                        // History, because this number has moved twice. It was 0.6; a headset
+                        // test at 0.6 put the view through the cockpit geometry, so it came down
+                        // to 0.25. But that clipping happened because the camera moved ALONE.
+                        // The pod now moves with it (the rigid cabin, below), so the head can no
+                        // longer move relative to the cabin at any value, and the reason for 0.25
+                        // is gone. What remains is purely visual: how far the drawn pod may sit
+                        // from where the physics has it. 0.6 is ~3.5% of a pod's length and
+                        // enough to absorb the measured chop, which ran 0.2-0.8 units a frame --
+                        // at 0.25 the filter could not have removed most of it.
+                        const float lim = 0.6f;
                         if (d > lim)
                             d = lim;
                         else if (d < -lim)
@@ -2940,8 +2970,28 @@ static void swrViewport_Render_Eye(int x) {
                         for (int i = 0; i < 3; i++)
                             lp_correction[i] = pod_up[i] * d;
                     }
-                    for (int i = 0; i < 3; i++)
-                        eye[i] -= lp_correction[i];
+                    // The camera and the cabin move TOGETHER, or neither moves. The pod is found
+                    // first; only if it can be moved is the camera moved too. The reverse order --
+                    // camera always, pod when possible -- reintroduces exactly the clipping this
+                    // exists to cure, on any frame the pod cannot be resolved (race end, respawn).
+                    //
+                    // partNodes[0] is the pod root -- the node whose visibility hides the whole
+                    // pod -- so offsetting it moves every part together. partNodes is a POINTER
+                    // HOP off the race object, the same class of read that crashed v1.2 and v1.4
+                    // at race end, where a null check passed on memory already freed. So: the
+                    // race must be live (the judge entity exists) and the array readable before
+                    // element 0 is touched. The pointer read is only ever COMPARED against node
+                    // addresses, never dereferenced.
+                    if (swrEvent_GetItem('Jdge', 0) != nullptr &&
+                        mem_is_readable(currentPlayer_Test->partNodes, sizeof(void *)) &&
+                        currentPlayer_Test->partNodes[0] != nullptr) {
+                        g_cabin_pod_root = currentPlayer_Test->partNodes[0];
+                        for (int i = 0; i < 3; i++) {
+                            eye[i] -= lp_correction[i];
+                            g_cabin_offset[i] = -lp_correction[i];
+                        }
+                        g_cabin_offset_active = true;
+                    }
                 }
             }
 
