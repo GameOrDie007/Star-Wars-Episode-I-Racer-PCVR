@@ -2767,6 +2767,17 @@ static void swrViewport_Render_Eye(int x) {
                 static float m_prev[3] = {0.0f, 0.0f, 0.0f};
                 static bool m_have = false;
                 static unsigned long m_bucket[8] = {0};
+                // Rotation, and REVERSALS. Amplitude alone cannot tell a pod smoothly rising
+                // over a crest from one vibrating, and those are opposite problems: the first
+                // is the game working, the second is what makes a corner feel wrong. Counting
+                // how often the direction flips separates them in one number. Rotation is
+                // measured because it was never measured -- a nose bobbing is more sickening
+                // than a body rising, and a fix for the wrong one of those does nothing.
+                static float m_prev_fwd[3] = {0.0f, 0.0f, 0.0f};
+                static unsigned long m_rot[8] = {0};
+                static float m_worst_rot = 0.0f;
+                static int m_sign_up = 0, m_sign_rot = 0;
+                static unsigned long m_flips_up = 0, m_flips_rot = 0;
                 static float m_worst = 0.0f;
                 static unsigned long m_frames = 0;
                 const unsigned long serial = vr_frame_serial();
@@ -2789,23 +2800,71 @@ static void swrViewport_Render_Eye(int x) {
                             if (a > m_worst)
                                 m_worst = a;
                             m_frames++;
+
+                            const int s_up = (du > 0.002f) ? 1 : ((du < -0.002f) ? -1 : 0);
+                            if (s_up != 0) {
+                                if (m_sign_up != 0 && s_up != m_sign_up)
+                                    m_flips_up++;
+                                m_sign_up = s_up;
+                            }
+
+                            // How far the nose swung this frame, in degrees. Pitch and yaw
+                            // together: both come straight through to the head in cockpit view.
+                            float dot = m_prev_fwd[0] * fwd[0] + m_prev_fwd[1] * fwd[1] +
+                                        m_prev_fwd[2] * fwd[2];
+                            if (dot > 1.0f)
+                                dot = 1.0f;
+                            else if (dot < -1.0f)
+                                dot = -1.0f;
+                            const float dang = acosf(dot) * (180.0f / 3.14159265f);
+                            static const float redge[8] = {0.05f, 0.10f, 0.25f, 0.50f,
+                                                           1.00f, 2.00f, 4.00f, 1e30f};
+                            for (int b = 0; b < 8; b++)
+                                if (dang < redge[b]) {
+                                    m_rot[b]++;
+                                    break;
+                                }
+                            if (dang > m_worst_rot)
+                                m_worst_rot = dang;
+                            // Sign of the pitch component, so a nose bobbing up and down
+                            // reads differently from a steady turn.
+                            const float dpitch = (fwd[2] - m_prev_fwd[2]);
+                            const int s_rot = (dpitch > 0.0005f) ? 1 : ((dpitch < -0.0005f) ? -1 : 0);
+                            if (s_rot != 0) {
+                                if (m_sign_rot != 0 && s_rot != m_sign_rot)
+                                    m_flips_rot++;
+                                m_sign_rot = s_rot;
+                            }
                         }
                     }
                     m_prev[0] = eye[0]; m_prev[1] = eye[1]; m_prev[2] = eye[2];
+                    m_prev_fwd[0] = fwd[0]; m_prev_fwd[1] = fwd[1]; m_prev_fwd[2] = fwd[2];
                     m_have = true;
 
                     if (hook_log != nullptr && m_frames >= 900) {
                         fprintf(hook_log,
                                 "[seat] along-pod-up movement per frame, units, %lu frames: "
                                 "<.02 %lu  <.05 %lu  <.10 %lu  <.20 %lu  <.40 %lu  <.80 %lu  "
-                                "<1.6 %lu  more %lu  | worst %.3f\n",
+                                "<1.6 %lu  more %lu  | worst %.3f | reversals %lu\n",
                                 m_frames, m_bucket[0], m_bucket[1], m_bucket[2], m_bucket[3],
-                                m_bucket[4], m_bucket[5], m_bucket[6], m_bucket[7], m_worst);
+                                m_bucket[4], m_bucket[5], m_bucket[6], m_bucket[7], m_worst,
+                                m_flips_up);
+                        fprintf(hook_log,
+                                "[nose] degrees per frame, %lu frames: <.05 %lu  <.10 %lu  "
+                                "<.25 %lu  <.50 %lu  <1.0 %lu  <2.0 %lu  <4.0 %lu  more %lu"
+                                "  | worst %.2f | reversals %lu\n",
+                                m_frames, m_rot[0], m_rot[1], m_rot[2], m_rot[3], m_rot[4],
+                                m_rot[5], m_rot[6], m_rot[7], m_worst_rot, m_flips_rot);
                         fflush(hook_log);
-                        for (int b = 0; b < 8; b++)
+                        for (int b = 0; b < 8; b++) {
                             m_bucket[b] = 0;
+                            m_rot[b] = 0;
+                        }
                         m_frames = 0;
                         m_worst = 0.0f;
+                        m_worst_rot = 0.0f;
+                        m_flips_up = 0;
+                        m_flips_rot = 0;
                     }
                 }
             }
