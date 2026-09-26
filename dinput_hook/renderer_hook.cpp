@@ -2392,7 +2392,7 @@ static void swrViewport_Render_Eye(int x) {
             // stays as a floor so a player who has tuned it does not lose it.
             float need = 0.0f;
             float aspect = 1.0f;
-            {
+            if (vr_cull_head_track()) {
                 const float kDeg = 3.14159265f / 180.0f;
                 const int eye = vr_get_current_eye();
                 need = vr_head_deviation_deg(eye) + vr_eye_cone_half_deg(eye) + 4.0f;

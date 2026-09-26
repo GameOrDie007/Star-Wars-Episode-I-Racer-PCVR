@@ -307,6 +307,11 @@ struct VrState {
     // F5 overlay magnification in VR only; flat play keeps its native size.
     float overlay_scale = 1.65f;
     float cull_fov_boost = 2.0f;
+    // Whether the cull cone follows the head as well as being multiplied by the boost. Split
+    // out as its own switch so the head-tracking half can be A/B'd in a race without a
+    // relaunch -- the alternative was comparing a race against a menu, which shares no
+    // geometry and answers nothing. Off = exactly the v1.4 behaviour, boost and all.
+    bool cull_head_track = true;
     // Menu navigation only: the first direction to pass the tilt threshold locks the other axis
     // out until the stick comes back to centre. A thumbstick pushed to a corner sends up AND
     // right at once, so one flick moves the selection two places in two different lists.
@@ -517,6 +522,7 @@ static void vr_settings_load(void) {
     g_s.hud_scale = vr_ini_get_f("hud_scale", g_s.hud_scale);
     g_s.overlay_scale = vr_ini_get_f("overlay_scale", g_s.overlay_scale);
     g_s.cull_fov_boost = vr_ini_get_f("cull_fov_boost", g_s.cull_fov_boost);
+    g_s.cull_head_track = vr_ini_get_b("cull_head_track", g_s.cull_head_track);
     g_s.menu_axis_lock = vr_ini_get_b("menu_axis_lock", g_s.menu_axis_lock);
     g_s.menu_lock_tilt = vr_ini_get_f("menu_lock_tilt", g_s.menu_lock_tilt);
     g_s.menu_shift = vr_ini_get_f("menu_shift", g_s.menu_shift);
@@ -590,6 +596,7 @@ void vr_settings_save(void) {
     vr_ini_set_f("hud_scale", g_s.hud_scale);
     vr_ini_set_f("overlay_scale", g_s.overlay_scale);
     vr_ini_set_f("cull_fov_boost", g_s.cull_fov_boost);
+    vr_ini_set_b("cull_head_track", g_s.cull_head_track);
     vr_ini_set_b("menu_axis_lock", g_s.menu_axis_lock);
     vr_ini_set_f("menu_lock_tilt", g_s.menu_lock_tilt);
     vr_ini_set_f("menu_shift", g_s.menu_shift);
@@ -2539,6 +2546,10 @@ float vr_get_cull_fov_boost(void) {
     return g_s.cull_fov_boost;
 }
 
+int vr_cull_head_track(void) {
+    return g_s.cull_head_track ? 1 : 0;
+}
+
 // Half-angle in DEGREES from this eye's forward axis out to the farthest CORNER of its frustum.
 // The corner, not the edge: an engine cull cone that only reaches the top edge still clips the
 // top corners, and on this canvas the corners are where the ground goes missing.
@@ -3132,6 +3143,11 @@ void vr_probe_draw_imgui(void) {
                           "this only matters if you want it wider still. 1.0 turns BOTH off\n"
                           "and hands culling back to the engine -- ground will disappear when\n"
                           "you look down.");
+    ImGui::Checkbox("Cull cone follows the head", &g_s.cull_head_track);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Untick to get v1.4 culling back, instantly, mid-race.\n"
+                          "Ticked: ground stays put when you look down, and the engine\n"
+                          "hands the renderer more geometry. This is the A/B.");
     ImGui::Checkbox("Menu: one stick direction at a time", &g_s.menu_axis_lock);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Menus only, never racing. A stick near a corner counts as two\n"
@@ -3294,6 +3310,7 @@ void vr_probe_draw_imgui(void) {
         before.panel_distance != g_s.panel_distance || before.panel_width != g_s.panel_width ||
         before.hud_scale != g_s.hud_scale || before.cull_fov_boost != g_s.cull_fov_boost ||
         before.menu_axis_lock != g_s.menu_axis_lock ||
+        before.cull_head_track != g_s.cull_head_track ||
         before.menu_lock_tilt != g_s.menu_lock_tilt ||
         memcmp(&before.overlay_scale, &g_s.overlay_scale, sizeof(float)) != 0 ||
         before.menu_shift != g_s.menu_shift || before.hud_redirect != g_s.hud_redirect ||

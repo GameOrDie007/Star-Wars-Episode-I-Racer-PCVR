@@ -108,6 +108,9 @@ void vr_frame_end(void);
 // hoping a constant does. 1.0 still means "leave the engine's frustum completely alone".
 float vr_get_cull_fov_boost(void);
 
+// Whether the cull cone tracks the head. 0 = v1.4 culling exactly, for an in-race A/B.
+int vr_cull_head_track(void);
+
 // Half-angle in degrees from an eye's forward axis to the farthest CORNER of its frustum, and
 // how far the head is currently looking away from the pod camera's own axis. Their sum is the
 // cone the engine has to cull for, for this eye, this frame.
