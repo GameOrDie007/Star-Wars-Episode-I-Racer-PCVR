@@ -339,8 +339,10 @@ unkillable until a reboot - that is a runtime-level behaviour, not specific to t
 ## Credits
 
 Built on [SW_RACER_RE](https://github.com/tim-tim707/SW_RACER_RE) by tim-tim707 and contributors,
-whose decompilation and OpenGL renderer replacement made all of this possible. The original game is
-the property of LucasArts / Lucasfilm.
+whose decompilation and OpenGL renderer replacement made all of this possible. Their own README,
+covering the decompilation and how to build it, is kept unchanged in
+[UPSTREAM_README.md](UPSTREAM_README.md). The original game is the property of LucasArts /
+Lucasfilm.
 
 `openxr_loader.dll` is the Khronos Group's OpenXR loader, redistributed unmodified under the
 Apache License 2.0.
