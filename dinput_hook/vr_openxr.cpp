@@ -287,8 +287,12 @@ struct VrState {
     // touched -- by rotating the view about the camera's own right axis. No rigid-cabin
     // counterpart is needed: rotating about the eye moves nearby cockpit geometry by
     // hundredths of a unit, and letting the cabin pitch around a level gaze is what a
-    // real head does in a shaking vehicle. OFF by default until a headset says otherwise.
-    float cockpit_pitch_smooth = 0.0f;
+    // real head does in a shaking vehicle.
+    //
+    // ON at 1.0 by default, after a headset test on 27 Sep: through the rough corner it
+    // was 'way less bumpy and jarring', with nothing odd about the cockpit or steering.
+    // Shipping it off would mean the players who reported the corner never get the fix.
+    float cockpit_pitch_smooth = 1.0f;
     float cockpit_pitch_ms = 120.0f;
     // Per-pod seat offsets. Index is the pilot id (0..22). NaN in [0] means 'not tuned',
     // which falls back to the three globals above -- a pod with no entry behaves exactly as

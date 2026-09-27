@@ -661,6 +661,27 @@ static bool mem_is_readable(const void *p, size_t bytes) {
     return want_end <= region_end;
 }
 
+// Is the game's own camera following this pod right now? The world position of the game's
+// camera is recovered from its world->view matrix exactly as the [cockpit] mode log does, and
+// compared with the pod's cockpit transform. See the note at the call site for why this is the
+// question that can be answered where "is the race still live" cannot.
+//
+// 200 units: the measured chase distance is ~5, look-back swings the camera within ~10, so this
+// has a wide margin in a race -- while the hub is elsewhere and freed-memory garbage measured
+// ~1e32. Written as !(d2 < limit) so that a NaN anywhere, in either matrix, stands the cockpit
+// down instead of slipping through a comparison that is always false.
+static bool cockpit_follows_game_camera(const rdMatrix44 &view, const rdMatrix44 &C) {
+    const float cx = -(view.vA.x * view.vD.x + view.vA.y * view.vD.y + view.vA.z * view.vD.z);
+    const float cy = -(view.vB.x * view.vD.x + view.vB.y * view.vD.y + view.vB.z * view.vD.z);
+    const float cz = -(view.vC.x * view.vD.x + view.vC.y * view.vD.y + view.vC.z * view.vD.z);
+    const float dx = cx - C.vD.x, dy = cy - C.vD.y, dz = cz - C.vD.z;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    const float limit = 200.0f;
+    if (!(d2 < limit * limit))
+        return false;
+    return true;
+}
+
 static float g_vr_capture_view[2][16] = {};
 static int g_vr_passes_this_frame[2] = {0, 0};
 
@@ -2751,7 +2772,44 @@ static void swrViewport_Render_Eye(int x) {
                 vr_cockpit_note_pod(pilot);
         }
     }
-    if (vr_cockpit_view() && currentPlayer_Test != nullptr && vr_cockpit_step_active()) {
+    // Only take the camera over while the game's OWN camera is actually following this pod.
+    //
+    // After a race the game keeps currentPlayer_Test pointing at the freed race object, and our
+    // cockpit step stays set because the code that clears it only runs during a race. So the
+    // cockpit camera went on rebuilding the view from cockpitXf -- read out of freed memory --
+    // through the results and the hub. The basis happened to stay normalised, so the degenerate-
+    // transform guard below passed, while the POSITION was ~1e32: the camera sat in the void,
+    // each eye drew ~0 vertices, and the hub rendered black until the 2D main menu. Same family
+    // as the v1.2 and v1.4 race-end crashes; this read just did not fault.
+    //
+    // "Is this pod still live" is documented elsewhere in this project as unanswerable from the
+    // game's flags. "Is the game's camera following this pod" is not: the chase camera sits ~5
+    // units from it (measured), look-back swings it round within ~10, and a pause leaves it where
+    // it was -- while in the hub it is somewhere else entirely, and garbage is astronomically far.
+    // One distance test covers all of it, and a NaN anywhere fails the comparison and stands the
+    // cockpit down rather than passing.
+    const bool cockpit_live =
+        vr_cockpit_view() && currentPlayer_Test != nullptr && vr_cockpit_step_active() &&
+        cockpit_follows_game_camera(view_mat, currentPlayer_Test->cockpitXf);
+    {
+        static int logged = -1;
+        const int want = (vr_cockpit_view() && currentPlayer_Test != nullptr &&
+                          vr_cockpit_step_active())
+                             ? 1
+                             : 0;
+        const int state = want ? (cockpit_live ? 2 : 1) : 0;
+        if (state != logged && hook_log != nullptr) {
+            logged = state;
+            if (state == 1)
+                fprintf(hook_log,
+                        "[cockpit] standing down: the game's camera is not following the pod "
+                        "(race over, results, hub, or a stale transform)\n");
+            else if (state == 2)
+                fprintf(hook_log, "[cockpit] engaged: the game's camera is following the pod\n");
+            fflush(hook_log);
+        }
+    }
+    if (cockpit_live) {
         const rdMatrix44 &C = currentPlayer_Test->cockpitXf;
 
         float fwd[3] = {C.vB.x, C.vB.y, C.vB.z};
