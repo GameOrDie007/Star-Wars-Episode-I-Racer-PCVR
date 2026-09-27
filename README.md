@@ -194,6 +194,11 @@ Worth tuning:
   fixed ground disappearing below a straight line when you looked down from a seated position.
   Raise this only if you want it wider still; 1.0 turns both off and hands culling back to the
   engine. Costs performance, so lower it if you need frames.
+- **Nose-bob smoothing** (cockpit view) - **on by default.** On rough stretches the pod's nose
+  pitches up and down several times a second, and in cockpit view that went straight into your
+  view. This steadies only that fast bobbing: steering is never touched, and hills, ramps and
+  jumps still follow the pod. Set it to 0 for the v1.4 camera, or raise *Nose-bob time* to
+  steady slower bobbing too.
 - **Bump smoothing** (cockpit view) - **off by default.** The cockpit camera is bolted rigidly
   to the pod, so a seam in the track goes straight into your head. This filters that out
   vertically - but because it works by holding your head still while the pod moves under it, at
