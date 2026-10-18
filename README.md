@@ -6,25 +6,55 @@ Star Wars Episode I: Racer (the 1999 PC release) in your PC VR headset, built as
 
 ## Installing
 
-Drop these into the game folder, next to `SWEP1RCR.EXE`:
+1. Download **`Star Wars Episode I Racer PCVR Installer.exe`** from the
+   [latest release](https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PCVR/releases/latest)
+   and double-click it. If Windows says it protected your PC, click **More info**, then
+   **Run anyway**. The installer is not code-signed.
+2. Press **INSTALL**. It finds your copy of the game (Steam, GOG or any folder), puts the mod in,
+   checks your PC for anything that would stop VR from starting, and adds a desktop shortcut.
+3. Start your headset streaming (Virtual Desktop or SteamVR), then press **PRESS START**.
 
-- `dinput.dll`: the mod plus the VR layer (about 7 MB)
-- `openxr_loader.dll`: the 32-bit Khronos loader (about 2 MB)
-- `assets/`: shaders and HD fonts (about 440 KB)
+Once it is installed, the game plays in VR however you start it: the desktop shortcut, Steam, or
+`SWEP1RCR.EXE` itself.
 
-`assets/shaders/` is required: the renderer reads its shaders from there and draws nothing without them. `assets/textures/` is optional. It holds the community mod's HD fonts and loading screens, and without it the game keeps its built-in fonts (`hook.log` says so).
+**Updating keeps your settings.** Run the installer again and press **UPDATE**. Your saves and
+`SW_RACER_RE.ini` are never touched.
 
-Start Virtual Desktop or SteamVR and connect your headset before you launch the game. Launch it from the game's own folder, because the game finds `data/` relative to the working folder:
+### Installing by hand
 
-    Set-Location "<game folder>"; .\SWEP1RCR.EXE
+Download the `.zip` from the same release, unzip it anywhere, and double-click **`Setup.bat`**. It
+does what the installer does, in a console window. If it cannot find the game, drag the game
+folder (the one holding `SWEP1RCR.EXE`) onto `Setup.bat`.
 
-Nothing else needs installing. `dinput.dll` is statically linked and uses only Windows' own libraries (no Visual C++ redistributable, no MinGW runtime), and `openxr_loader.dll` needs only kernel32 and advapi32.
+Setup puts three things next to `SWEP1RCR.EXE`, because the game only loads the mod from its own
+folder: `dinput.dll` (the mod), `openxr_loader.dll` (the 32-bit OpenXR loader) and `assets\`
+(shaders and HD fonts). Its own files go in a `VR` folder inside the game folder:
 
-A stock Steam install of this game crashes on launch, and these files fix that too: on a clean machine, a fresh Steam install crashed, and with the three items above it started and ran in VR. You don't need the `dinput.dll` passed around on the Steam forums. Ours takes the same slot and does the same job. A stock install has no `dinput.dll` of its own, so one already in your folder is something you added; back it up first if you want a way back.
+- `Star Wars Episode I Racer VR.cmd` starts the game in VR, and
+  `Star Wars Episode I Racer (flat).cmd` starts it on the monitor without VR.
+- `Uninstall.bat` removes everything Setup added and puts back any file it replaced (another
+  mod's `dinput.dll`, for example). Your saves and settings stay.
+- `Collect logs.bat` puts the logs and a short description of your PC in one zip on your desktop,
+  for a bug report.
 
-Custom tracks aren't included. The community mod's `assets/custom_tracks/` folder (user-made courses, about 217 MB) has nothing to do with VR and is left out to keep the download small. To add them, take that folder from the [SW_RACER_RE release](https://github.com/tim-tim707/SW_RACER_RE/releases) and drop it in beside the others.
+Nothing else is changed. If you would rather copy the files in yourself, take `dinput.dll`,
+`openxr_loader.dll` and `assets\` from the zip's `files` folder and put them next to
+`SWEP1RCR.EXE`; delete those three to remove it.
 
-`openvr_api.dll` is not needed. If you have one from an earlier build of this mod, delete it.
+**Nothing else needs installing.** `dinput.dll` imports only Windows system libraries: no Visual
+C++ redistributable, no other runtime.
+
+**A stock Steam install of this game crashes on launch, and this mod fixes it.** You do not need
+the `dinput.dll` that circulates on the Steam forums: ours sits in the same place and does the same
+job.
+
+**Custom tracks are not included.** The community mod's `assets\custom_tracks\` folder (user-made
+courses, about 217 MB) has nothing to do with VR and is left out to keep the download small. To
+add them, take that folder from the
+[SW_RACER_RE release](https://github.com/tim-tim707/SW_RACER_RE/releases) and put it in the game's
+`assets` folder.
+
+`openvr_api.dll` is not needed. If you have one from an early build of this mod, delete it.
 
 ## Requirements
 
