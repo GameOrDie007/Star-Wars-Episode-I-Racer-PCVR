@@ -7,7 +7,7 @@ Star Wars Episode I: Racer (the 1999 PC release) in your PC VR headset, built as
 ## Installing
 
 1. Download **`Star Wars Episode I Racer PCVR Installer.exe`** from the
-   [latest release](https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PCVR/releases/latest)
+   [latest release](https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PC/releases/latest)
    and double-click it. If Windows says it protected your PC, click **More info**, then
    **Run anyway**. The installer is not code-signed.
 2. Press **INSTALL**. It finds your copy of the game (Steam, GOG or any folder), puts the mod in,
@@ -192,7 +192,7 @@ Built on [SW_RACER_RE](https://github.com/tim-tim707/SW_RACER_RE) by tim-tim707 
 
 ## License and source
 
-This mod is under the **GNU Affero General Public License, version 3**, the license of the SW_RACER_RE project it's built on. The full text is in `LICENSE`. The complete source, including the VR layer, is here: https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PCVR
+This mod is under the **GNU Affero General Public License, version 3**, the license of the SW_RACER_RE project it's built on. The full text is in `LICENSE`. The complete source, including the VR layer, is here: https://github.com/GameOrDie007/Star-Wars-Episode-I-Racer-PC
 
 No game data is included. You need your own legally obtained copy of Star Wars Episode I: Racer.
 
